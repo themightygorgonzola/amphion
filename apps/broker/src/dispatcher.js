@@ -86,8 +86,11 @@ function buildDispatcherInput (message, context) {
  * even if there's surrounding prose (model sometimes adds ```json fences).
  */
 function parseJobTicket (raw, originalMessage) {
+  // Strip qwen3 chain-of-thought thinking blocks if present
+  const withoutThinking = raw.replace(/<think>[\s\S]*?<\/think>/gi, '').trim()
+
   // Strip markdown code fences if present
-  const cleaned = raw
+  const cleaned = withoutThinking
     .replace(/^```json\s*/i, '')
     .replace(/^```\s*/i, '')
     .replace(/\s*```$/i, '')

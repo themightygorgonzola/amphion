@@ -182,10 +182,13 @@ function parseAgentResult (domain, mcpResult) {
   try { parsed = JSON.parse(text) } catch { parsed = { raw: text } }
 
   if (parsed.results) {
+    const content = parsed.results.map((r, i) =>
+      `[Result ${i + 1}] ${r.title ?? '(untitled)'}\n${r.content ?? r.text ?? JSON.stringify(r)}`
+    ).join('\n\n')
     return {
       domain,
       success: true,
-      summary: `Found ${parsed.results.length} result(s) from the ${domain} knowledge base.${parsed.message ? ' ' + parsed.message : ''}`,
+      summary: parsed.results.length > 0 ? content : `No documents found in ${domain} knowledge base.`,
       items:   parsed.results,
     }
   }
@@ -209,10 +212,13 @@ function parseAgentResult (domain, mcpResult) {
   }
 
   if (parsed.deals) {
+    const content = parsed.deals.map((d, i) =>
+      `[Deal ${i + 1}] ${d.title ?? '(untitled)'}\n${d.content ?? d.text ?? JSON.stringify(d)}`
+    ).join('\n\n')
     return {
       domain,
       success: true,
-      summary: `Retrieved ${parsed.count ?? parsed.deals.length} deal record(s).`,
+      summary: parsed.deals.length > 0 ? content : `No deal records found in ${domain} knowledge base.`,
       items:   parsed.deals,
     }
   }

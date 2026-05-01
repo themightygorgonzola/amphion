@@ -34,7 +34,9 @@ export async function callOllama ({ model, systemPrompt, userMessage, stream = f
     { role: 'user', content: userMessage },
   ]
 
-  const body = JSON.stringify({ model, messages, stream })
+  // Disable chain-of-thought thinking for models that support it (qwen3).
+  // This prevents <think>...</think> tokens from polluting JSON dispatcher output.
+  const body = JSON.stringify({ model, messages, stream, think: false })
 
   const res = await fetch(`${OLLAMA_HOST()}/api/chat`, {
     method: 'POST',
