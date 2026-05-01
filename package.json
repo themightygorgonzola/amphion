@@ -12,12 +12,17 @@
     "dev:down": "docker compose -f infra/docker-compose.dev.yml down",
     "dev:build": "docker compose -f infra/docker-compose.dev.yml up --build",
     "migrate": "node scripts/migrate.js",
+    "ingest": "node scripts/ingest.js",
+    "seed": "node scripts/seed-context.js",
     "broker": "node apps/broker/src/index.js",
     "broker:dev": "nodemon apps/broker/src/index.js",
-    "desktop": "electron apps/desktop/src/main.js",
-    "desktop:dev": "electron apps/desktop/src/main.js --dev",
+    "desktop": "node_modules/electron/dist/electron.exe apps/desktop/src/main.js",
+    "desktop:dev": "node_modules/electron/dist/electron.exe apps/desktop/src/main.js --dev",
     "lint": "eslint .",
     "format": "prettier --write ."
+  },
+  "dependencies": {
+    "pg": "^8.12.0"
   },
   "devDependencies": {
     "eslint": "^9.0.0",
