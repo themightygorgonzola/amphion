@@ -1,0 +1,24 @@
+Recommended Next Session Scope:
+
+Do DB migrations + broker pipeline (the four layers). That's where the real architecture sits.
+
+Session 2 goal: POST /query to the broker returns a response, streaming via SSE.
+
+Write three SQL files (001, 002, 003) and apply them against local pgvector
+Build apps/broker/src/ with the four pipeline layers (mostly stubbed, calls to mock-ollama)
+Add Express routes: POST /query, GET /stream
+Verify: curl -X POST http://localhost:3000/query -H "Content-Type: application/json" -d '{"message": "test"}' → streams a response
+That's one full pipeline proved without agents or Electron yet.
+
+What's Truly Blocked Until Hardware?
+
+Nothing. Everything is mockable. The dev stack is complete enough to build the entire broker, test agent interfaces, and build the Electron UI without a single GPU sitting anywhere.
+
+
+
+
+
+
+
+DOCKER?
+Docker Desktop isn't installed or not in PATH. Let's keep moving — build all the broker code so it's ready the moment Docker is available. The migrations will apply in 30 seconds once it's up.
