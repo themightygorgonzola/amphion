@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Content-Security-Policy"
+    content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline';" />
+  <title>Atlas</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="app">
+    <!-- Sidebar -->
+    <aside id="sidebar">
+      <div id="brand">
+        <span id="brand-name">Atlas</span>
+        <span id="brand-status" class="status-dot offline" title="Broker offline"></span>
+      </div>
+      <button id="new-chat-btn">+ New Chat</button>
+      <nav id="history-list"></nav>
+    </aside>
+
+    <!-- Main chat area -->
+    <main id="chat-area">
+      <div id="messages"></div>
+
+      <form id="input-form">
+        <div id="input-row">
+          <textarea
+            id="message-input"
+            placeholder="Ask Atlas anything..."
+            rows="1"
+            autofocus
+          ></textarea>
+          <button type="submit" id="send-btn">Send</button>
+        </div>
+        <div id="status-bar"></div>
+      </form>
+    </main>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

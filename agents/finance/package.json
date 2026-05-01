@@ -1,0 +1,12 @@
+{
+  "name": "@amphion/agent-finance",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "index.js",
+  "dependencies": {
+    "@amphion/agent-base": "*",
+    "dotenv": "^16.4.0",
+    "pg": "^8.12.0"
+  }
+}

@@ -14,6 +14,8 @@
     "migrate": "node scripts/migrate.js",
     "broker": "node apps/broker/src/index.js",
     "broker:dev": "nodemon apps/broker/src/index.js",
+    "desktop": "electron apps/desktop/src/main.js",
+    "desktop:dev": "electron apps/desktop/src/main.js --dev",
     "lint": "eslint .",
     "format": "prettier --write ."
   },

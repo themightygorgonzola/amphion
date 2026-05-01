@@ -1,17 +1,56 @@
 /**
  * broker/src/agent-runner.js — Agent execution layer
  *
- * Current state (Session 2): All agents are stubs.
- * Each returns a realistic-looking result so the full pipeline can be
- * tested end-to-end without any real MCP processes.
+ * Spawns each domain agent as a child process (MCP STDIO transport).
+ * Sends an initialize handshake then a tools/call message.
+ * The agent process is short-lived: spawned per-call, killed on response.
  *
- * Session 3 upgrade path:
- *   Replace each domain case below with a real MCP STDIO call:
- *   spawn(`node agents/${domain}/index.js`, ...)
- *   then send a JSON-RPC "tools/call" message and await the response.
+ * Agent entry points:  agents/{domain}/index.js
+ * Protocol:            JSON-RPC 2.0 over newline-delimited stdout/stdin
  *
  * @typedef {import('./orchestrator.js').AgentResult} AgentResult
  */
+
+import { spawn } from 'child_process'
+import path from 'path'
+import { fileURLToPath } from 'url'
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
+// agents/ is 3 levels up from apps/broker/src/
+const AGENTS_ROOT = path.resolve(__dirname, '../../../agents')
+
+// Map domain → { file, tool, argBuilder }
+const DOMAIN_CONFIG = {
+  research: {
+    file:       'research/index.js',
+    tool:       'search_knowledge',
+    argBuilder: (task) => ({ query: task, k: 5 }),
+  },
+  finance: {
+    file:       'finance/index.js',
+    tool:       'search_financials',
+    argBuilder: (task) => ({ query: task, k: 5 }),
+  },
+  legal: {
+    file:       'legal/index.js',
+    tool:       'review_contract',
+    argBuilder: (task) => ({ topic: task, k: 5 }),
+  },
+  comms: {
+    file:       'comms/index.js',
+    tool:       'draft_email',
+    argBuilder: (task, context) => ({
+      recipient: context?.keyContacts?.[0]?.name ?? 'the relevant party',
+      purpose:   task,
+      tone:      context?.tonePreferences ?? 'professional',
+    }),
+  },
+  proposals: {
+    file:       'proposals/index.js',
+    tool:       'find_similar_proposals',
+    argBuilder: (task) => ({ description: task, k: 5 }),
+  },
+}
 
 /**
  * Run a domain agent with the given task.
@@ -22,79 +61,176 @@
  * @returns {Promise<AgentResult>}
  */
 export async function runAgent (domain, task, context) {
-  console.log(`[agent-runner] running ${domain} stub | task: "${task.slice(0, 80)}..."`)
+  const config = DOMAIN_CONFIG[domain]
 
-  // Simulate a small amount of work
-  await sleep(50)
+  if (!config) {
+    console.warn(`[agent-runner] unknown domain "${domain}" — no agent configured`)
+    return { domain, success: false, summary: `No agent configured for domain: ${domain}`, items: [] }
+  }
 
-  switch (domain) {
-    case 'research':
-      return {
-        domain: 'research',
-        success: true,
-        summary: `Research stub: I searched the knowledge base for "${task.slice(0, 60)}" and found 3 relevant documents. The most relevant item is a market analysis from Q1 2024 that aligns with this query. No real semantic search performed yet — this is a stub response pending pgvector integration.`,
-        items: [
-          { title: 'Market Analysis Q1 2024', relevance: 0.91 },
-          { title: 'Industry Overview 2023', relevance: 0.84 },
-          { title: 'Competitive Landscape Notes', relevance: 0.78 },
-        ],
-      }
+  console.log(`[agent-runner] spawning ${domain} | task: "${task.slice(0, 80)}..."`)
 
-    case 'finance':
-      return {
-        domain: 'finance',
-        success: true,
-        summary: `Finance stub: Retrieved relevant financial data for "${task.slice(0, 60)}". Current pipeline pull shows no outstanding red flags. Budget tracking and deal valuations are nominal. Awaiting real data ingestion via scripts/ingest.js.`,
-        items: [
-          { category: 'Q2 Budget', status: 'on-track' },
-        ],
-      }
-
-    case 'legal':
-      return {
-        domain: 'legal',
-        success: true,
-        summary: `Legal stub: Reviewed relevant legal context for "${task.slice(0, 60)}". No flagged compliance issues found in stub data. NDA and contract templates are available. Real document analysis pending ingest.`,
-        items: [],
-      }
-
-    case 'comms':
-      return {
-        domain: 'comms',
-        success: true,
-        summary: `Comms stub: Drafted a communication approach for "${task.slice(0, 60)}". Recommended channel: email. Tone: professional. Full draft generation awaiting real agent implementation.`,
-        items: [
-          { channel: 'email', status: 'draft-pending' },
-        ],
-      }
-
-    case 'proposals':
-      return {
-        domain: 'proposals',
-        success: true,
-        summary: `Proposals stub: Searched proposal library for "${task.slice(0, 60)}". Found 2 similar past proposals. Win rate for this proposal type: 67%. Template matching and full generation pending real agent implementation.`,
-        items: [
-          { title: 'Henderson Construction Proposal', status: 'won', year: 2023 },
-          { title: 'Meridian Group RFP Response', status: 'pending', year: 2024 },
-        ],
-      }
-
-    case 'dev':
-      return {
-        domain: 'dev',
-        success: true,
-        summary: `Dev stub: Analyzed the code request: "${task.slice(0, 60)}". devstral agent is stubbed. Full coding capability pending MCP STDIO integration.`,
-        items: [],
-      }
-
-    default:
-      return {
-        domain,
-        success: false,
-        summary: `Unknown domain "${domain}" — no agent available.`,
-        error: `No agent registered for domain: ${domain}`,
-      }
+  try {
+    const rawResult = await callAgentProcess(config, task, context)
+    return parseAgentResult(domain, rawResult)
+  } catch (err) {
+    console.error(`[agent-runner] ${domain} failed: ${err.message}`)
+    return {
+      domain,
+      success: false,
+      summary: `Agent error: ${err.message}`,
+      items:   [],
+      error:   err.message,
+    }
   }
 }
 
-const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms))
+/**
+ * Spawn an agent process and exchange MCP messages.
+ */
+function callAgentProcess (config, task, context) {
+  return new Promise((resolve, reject) => {
+    const agentPath = path.join(AGENTS_ROOT, config.file)
+    const domainName = config.file.split('/')[0]
+
+    const child = spawn('node', [agentPath], {
+      env: { ...process.env, AMPHION_AGENT: domainName },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    })
+
+    let stdoutBuf = ''
+    let msgId = 1
+    let initialized = false
+    let settled = false
+
+    const settle = (fn) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      child.stdin.destroy()
+      fn()
+    }
+
+    const send = (msg) => {
+      child.stdin.write(JSON.stringify(msg) + '\n')
+    }
+
+    child.stdout.setEncoding('utf8')
+    child.stdout.on('data', (chunk) => {
+      stdoutBuf += chunk
+      const lines = stdoutBuf.split('\n')
+      stdoutBuf = lines.pop()
+
+      for (const line of lines) {
+        const trimmed = line.trim()
+        if (!trimmed) continue
+        let msg
+        try { msg = JSON.parse(trimmed) } catch { continue }
+
+        if (!initialized) {
+          // Got initialize response — send tools/call
+          initialized = true
+          send({
+            jsonrpc: '2.0',
+            id: ++msgId,
+            method: 'tools/call',
+            params: {
+              name:      config.tool,
+              arguments: config.argBuilder(task, context),
+            },
+          })
+        } else {
+          // Got tools/call response — done
+          if (msg.error) {
+            settle(() => reject(new Error(msg.error.message)))
+          } else {
+            settle(() => resolve(msg.result))
+          }
+        }
+      }
+    })
+
+    child.stderr.setEncoding('utf8')
+    child.stderr.on('data', (chunk) => {
+      chunk.split('\n').filter(Boolean).forEach(l => console.log(`  [${domainName}] ${l}`))
+    })
+
+    child.on('error', (err) => settle(() => reject(err)))
+
+    // 30-second hard timeout
+    const timer = setTimeout(() => {
+      child.kill()
+      settle(() => reject(new Error(`Agent ${domainName} timed out after 30s`)))
+    }, 30_000)
+
+    // Start MCP handshake
+    send({
+      jsonrpc: '2.0',
+      id: msgId,
+      method: 'initialize',
+      params: { clientInfo: { name: 'amphion-broker', version: '0.1.0' } },
+    })
+  })
+}
+
+/**
+ * Convert raw MCP tool result into our AgentResult shape.
+ */
+function parseAgentResult (domain, mcpResult) {
+  const text = mcpResult?.content?.[0]?.text ?? '{}'
+  let parsed = {}
+  try { parsed = JSON.parse(text) } catch { parsed = { raw: text } }
+
+  if (parsed.results) {
+    return {
+      domain,
+      success: true,
+      summary: `Found ${parsed.results.length} result(s) from the ${domain} knowledge base.${parsed.message ? ' ' + parsed.message : ''}`,
+      items:   parsed.results,
+    }
+  }
+
+  if (parsed.draft) {
+    return {
+      domain,
+      success: true,
+      summary: `Drafted communication for: ${parsed.purpose ?? parsed.recipient ?? 'request'}`,
+      items:   [{ draft: parsed.draft }],
+    }
+  }
+
+  if (parsed.outline) {
+    return {
+      domain,
+      success: true,
+      summary: `Generated proposal outline for: ${parsed.opportunity ?? 'opportunity'}`,
+      items:   [{ outline: parsed.outline }],
+    }
+  }
+
+  if (parsed.deals) {
+    return {
+      domain,
+      success: true,
+      summary: `Retrieved ${parsed.count ?? parsed.deals.length} deal record(s).`,
+      items:   parsed.deals,
+    }
+  }
+
+  if (parsed.win_rate !== undefined) {
+    return {
+      domain,
+      success: true,
+      summary: `Win rate: ${parsed.win_rate} (${parsed.won}/${parsed.total} proposals)`,
+      items:   [parsed],
+    }
+  }
+
+  return {
+    domain,
+    success: true,
+    summary: parsed.message ?? `${domain} agent completed.`,
+    items:   [],
+  }
+}
+

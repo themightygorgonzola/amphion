@@ -45,27 +45,28 @@ app.post('/query', async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*')
   res.flushHeaders()
 
-  // Helper: send a named SSE event
-  const send = (event, data) => {
-    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
+  // Helper: send a flat SSE data line with type field (matches renderer's handleEvent)
+  const send = (type, payload = {}) => {
+    res.write(`data: ${JSON.stringify({ type, ...payload })}\n\n`)
   }
 
   try {
     // Stage 1: Context Assembler (no LLM, fast)
-    send('status', { step: 'assembling context...' })
+    send('status', { message: 'Assembling context...' })
     const context = await assembleContext(sessionId)
 
     // Stage 2: Dispatcher — classifies query, returns job ticket
-    send('status', { step: 'dispatching...' })
+    send('status', { message: 'Routing your request...' })
     const jobTicket = await dispatch(message, context)
-    send('ticket', jobTicket)
+    send('ticket', { data: jobTicket })
 
     // Stage 3: Orchestrator — calls domain agents per job ticket
-    send('status', { step: `running ${jobTicket.domains.join(', ')} agent${jobTicket.domains.length > 1 ? 's' : ''}...` })
+    const domainLabel = jobTicket.domains.join(', ')
+    send('status', { message: `Consulting ${domainLabel}...` })
     const agentResults = await orchestrate(jobTicket, message, context)
 
     // Stage 4: Voice Layer — synthesizes everything into one response
-    send('status', { step: 'synthesizing response...' })
+    send('status', { message: 'Composing response...' })
     const response = await synthesize(agentResults, message, context)
 
     // Deliver the final response
@@ -88,7 +89,11 @@ app.post('/query', async (req, res) => {
 // GET /health
 // ---------------------------------------------------------------------------
 app.get('/health', (req, res) => {
-  res.json({ ok: true, system: process.env.SYSTEM_NAME ?? 'amphion' })
+  res.json({
+    ok:          true,
+    system:      process.env.SYSTEM_NAME  ?? 'amphion',
+    displayName: process.env.DISPLAY_NAME ?? 'Atlas',
+  })
 })
 
 // ---------------------------------------------------------------------------
