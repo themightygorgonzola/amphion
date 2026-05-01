@@ -1,0 +1,3 @@
+-- SQL migration files live here
+-- Naming: 001_description.sql, 002_description.sql ...
+-- Applied in order. Never edit applied migrations — add new ones.

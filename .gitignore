@@ -1,0 +1,43 @@
+# Dependencies
+node_modules/
+
+# Environment
+.env
+.env.local
+.env.production
+
+# Build output
+dist/
+out/
+build/
+.next/
+
+# Model weights
+*.gguf
+*.bin
+*.safetensors
+models/
+
+# Docker runtime volumes
+docker-volumes/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/settings.json
+.idea/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# SQLite runtime databases (keep schema, not runtime data)
+data/*.db
+data/*.sqlite
+
+# Electron packaged output
+apps/desktop/out/
+apps/desktop/dist/

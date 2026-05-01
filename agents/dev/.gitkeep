@@ -1,0 +1,3 @@
+-- Dev agent — self-augmentation pipeline
+-- read_codebase, write_tool, run_sandbox_test, apply_change, rollback_change
+-- Week 6+ feature. Do not implement until core agents are stable.

@@ -1,0 +1,28 @@
+services:
+  pgvector:
+    image: pgvector/pgvector:pg18
+    container_name: amphion-pgvector-dev
+    environment:
+      POSTGRES_DB: amphion
+      POSTGRES_USER: amphion
+      POSTGRES_PASSWORD: changeme
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgvector-dev-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U amphion"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  mock-ollama:
+    build:
+      context: ./mock-ollama
+      dockerfile: Dockerfile
+    container_name: amphion-mock-ollama
+    ports:
+      - "11434:11434"
+
+volumes:
+  pgvector-dev-data:
