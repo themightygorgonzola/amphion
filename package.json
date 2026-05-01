@@ -10,6 +10,9 @@
     "dev": "docker compose -f infra/docker-compose.dev.yml up",
     "dev:down": "docker compose -f infra/docker-compose.dev.yml down",
     "dev:build": "docker compose -f infra/docker-compose.dev.yml up --build",
+    "migrate": "node scripts/migrate.js",
+    "broker": "node apps/broker/src/index.js",
+    "broker:dev": "nodemon apps/broker/src/index.js",
     "lint": "eslint .",
     "format": "prettier --write ."
   },

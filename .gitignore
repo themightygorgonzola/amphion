@@ -36,6 +36,8 @@ npm-debug.log*
 
 # SQLite runtime databases (keep schema, not runtime data)
 data/*.db
+data/*.db-shm
+data/*.db-wal
 data/*.sqlite
 
 # Electron packaged output
