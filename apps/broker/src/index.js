@@ -18,7 +18,7 @@ import { randomUUID } from 'crypto'
 import { assembleContext } from './context-assembler.js'
 import { dispatch } from './dispatcher.js'
 import { orchestrate } from './orchestrator.js'
-import { synthesize } from './voice-layer.js'
+import { synthesizeStream } from './voice-layer.js'
 import { initDb, saveConversationTurn } from './db.js'
 
 const app = express()
@@ -65,16 +65,18 @@ app.post('/query', async (req, res) => {
     send('status', { message: `Consulting ${domainLabel}...` })
     const agentResults = await orchestrate(jobTicket, message, context)
 
-    // Stage 4: Voice Layer — synthesizes everything into one response
+    // Stage 4: Voice Layer — stream tokens directly to client
     send('status', { message: 'Composing response...' })
-    const response = await synthesize(agentResults, message, context)
-
-    // Deliver the final response
-    send('response', { content: response, sessionId })
+    const tokenStream = await synthesizeStream(agentResults, message, context)
+    let fullResponse = ''
+    for await (const token of tokenStream) {
+      fullResponse += token
+      send('token', { token })
+    }
 
     // Save this turn to conversation history
     saveConversationTurn(sessionId, 'user', message, { jobTicket })
-    saveConversationTurn(sessionId, 'assistant', response, { domains: jobTicket.domains })
+    saveConversationTurn(sessionId, 'assistant', fullResponse, { domains: jobTicket.domains })
 
   } catch (err) {
     console.error('[broker] pipeline error:', err)
