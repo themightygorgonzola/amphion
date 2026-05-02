@@ -71,13 +71,18 @@ export async function dispatch (message, context) {
 // ---------------------------------------------------------------------------
 
 function buildDispatcherInput (message, context) {
-  return [
+  const parts = [
     `USER CONTEXT:`,
     context.contextSummary,
-    ``,
-    `USER MESSAGE:`,
-    message,
-  ].join('\n')
+  ]
+
+  if (context.recentActivitySummary) {
+    parts.push(``, `RECENT ACTIVITY (last few turns across all sessions):`, context.recentActivitySummary)
+  }
+
+  parts.push(``, `USER MESSAGE:`, message)
+
+  return parts.join('\n')
 }
 
 /**

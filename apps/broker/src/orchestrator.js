@@ -40,15 +40,14 @@ export async function orchestrate (jobTicket, originalMessage, context) {
 
   if (domains.length === 1) {
     const domain = domains[0]
-    const result = await runAgent(domain, instructions[domain] ?? originalMessage, context)
+    const result = await runWithRetry(domain, instructions[domain] ?? originalMessage, context)
     return { [domain]: result }
   }
 
   if (parallel) {
-    // Run all domains simultaneously
     const entries = await Promise.all(
       domains.map(async domain => {
-        const result = await runAgent(domain, instructions[domain] ?? originalMessage, context)
+        const result = await runWithRetry(domain, instructions[domain] ?? originalMessage, context)
         return [domain, result]
       })
     )
@@ -60,9 +59,8 @@ export async function orchestrate (jobTicket, originalMessage, context) {
   let accumulatedContext = context
 
   for (const domain of domains) {
-    const result = await runAgent(domain, instructions[domain] ?? originalMessage, accumulatedContext)
+    const result = await runWithRetry(domain, instructions[domain] ?? originalMessage, accumulatedContext)
     results[domain] = result
-    // Enrich context with this domain's summary for the next agent
     accumulatedContext = {
       ...accumulatedContext,
       previousResults: { ...(accumulatedContext.previousResults ?? {}), [domain]: result.summary }
@@ -70,6 +68,49 @@ export async function orchestrate (jobTicket, originalMessage, context) {
   }
 
   return results
+}
+
+/**
+ * Run an agent, and if it returns nothing useful, retry once with a
+ * simplified query (proper nouns, dates, and quoted strings stripped).
+ */
+async function runWithRetry (domain, task, context) {
+  const result = await runAgent(domain, task, context)
+
+  const isEmpty = !result.success || !result.summary?.trim() ||
+    result.items?.length === 0 && result.summary?.startsWith('No ')
+
+  if (!isEmpty) return result
+
+  // Simplify: strip quoted strings, ISO dates, and sequences of capitalized words
+  const simplified = task
+    .replace(/"[^"]*"/g, '')
+    .replace(/\b\d{4}-\d{2}-\d{2}\b/g, '')
+    .replace(/\b([A-Z][a-z]+ ){1,4}[A-Z][a-z]+\b/g, '')  // "Henderson Capital Tower" → ''
+    .replace(/\s{2,}/g, ' ')
+    .trim()
+
+  if (!simplified || simplified === task) {
+    // Nothing to simplify — mark and return original
+    result.foundNothing = true
+    result.triedQueries = [task]
+    return result
+  }
+
+  console.log(`[orchestrator] ${domain} returned empty — retrying with simplified query: "${simplified}"`)
+  const retry = await runAgent(domain, simplified, context)
+
+  const retryEmpty = !retry.success || !retry.summary?.trim() ||
+    retry.items?.length === 0 && retry.summary?.startsWith('No ')
+
+  if (retryEmpty) {
+    retry.foundNothing = true
+    retry.triedQueries = [task, simplified]
+  } else {
+    retry.triedQueries = [task, simplified]
+  }
+
+  return retry
 }
 
 function stubResult (domain, message) {

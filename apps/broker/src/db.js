@@ -143,6 +143,63 @@ export function getRecentHistory (sessionId, limit = 10) {
 }
 
 /**
+ * Get the most recent turns across ALL sessions (cross-session context).
+ * Used to give Atlas awareness of recent activity even in a fresh session.
+ * @param {number} [limit=5]
+ * @returns {{ role: string, content: string, created_at: string }[]}
+ */
+export function getGlobalRecentHistory (limit = 5) {
+  const db = getSqlite()
+  const rows = db.prepare(`
+    SELECT role, content, created_at
+    FROM conversations
+    ORDER BY created_at DESC
+    LIMIT ?
+  `).all(limit)
+  return rows.reverse()
+}
+
+/**
+ * Search conversations by one or more keywords (LIKE match on content).
+ * @param {string[]} keywords
+ * @param {number} [limit=20]
+ * @returns {{ role: string, content: string, created_at: string, session_id: string }[]}
+ */
+export function searchConversationsByKeywords (keywords, limit = 20) {
+  if (!keywords.length) return []
+  const db = getSqlite()
+  const conditions = keywords.map(() => `content LIKE ?`).join(' OR ')
+  const params = keywords.map(k => `%${k}%`)
+  const rows = db.prepare(`
+    SELECT role, content, created_at, session_id
+    FROM conversations
+    WHERE ${conditions}
+    ORDER BY created_at DESC
+    LIMIT ?
+  `).all(...params, limit)
+  return rows
+}
+
+/**
+ * Search conversations within a date range.
+ * @param {string} from  — ISO date string e.g. '2026-04-01'
+ * @param {string} to    — ISO date string e.g. '2026-04-30'
+ * @param {number} [limit=20]
+ * @returns {{ role: string, content: string, created_at: string, session_id: string }[]}
+ */
+export function searchConversationsByDateRange (from, to, limit = 20) {
+  const db = getSqlite()
+  const rows = db.prepare(`
+    SELECT role, content, created_at, session_id
+    FROM conversations
+    WHERE created_at BETWEEN ? AND ?
+    ORDER BY created_at DESC
+    LIMIT ?
+  `).all(from, to + 'T23:59:59', limit)
+  return rows
+}
+
+/**
  * Get the current user_context row.
  * @returns {object}
  */

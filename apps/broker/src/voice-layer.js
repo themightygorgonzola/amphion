@@ -89,10 +89,27 @@ function buildVoiceInput (agentResults, originalMessage, context) {
   const resultLines = []
 
   for (const [domain, result] of Object.entries(agentResults)) {
+    if (domain === '_meta') continue  // skip internal metadata
+
     if (!result.success) {
-      resultLines.push(`[${domain.toUpperCase()} — ERROR] ${result.error ?? 'Unknown error'}`)
+      resultLines.push(`[${domain.toUpperCase()} — ERROR — do not fabricate, tell the user this failed]\n${result.error ?? 'Unknown error'}`)
       continue
     }
+
+    if (result.foundNothing) {
+      resultLines.push(`[${domain.toUpperCase()} — NO RESULTS — do not fabricate coverage, tell the user nothing was found]`)
+      continue
+    }
+
+    // Recall agent returns conversation turns — format as excerpts
+    if (domain === 'recall' && result.items?.length > 0) {
+      const excerpts = result.items.map(t =>
+        `  ${t.role === 'user' ? 'You' : 'Atlas'} (${t.created_at ?? 'earlier'}): ${t.content?.slice(0, 300)}`
+      ).join('\n')
+      resultLines.push(`[RECALL — past conversations]\n${excerpts}`)
+      continue
+    }
+
     resultLines.push(`[${domain.toUpperCase()}]\n${result.summary}`)
   }
 

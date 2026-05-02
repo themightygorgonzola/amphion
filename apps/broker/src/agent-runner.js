@@ -50,6 +50,11 @@ const DOMAIN_CONFIG = {
     tool:       'find_similar_proposals',
     argBuilder: (task) => ({ description: task, k: 5 }),
   },
+  recall: {
+    file:       'recall/index.js',
+    tool:       'search_memory',
+    argBuilder: (task) => ({ task, limit: 20 }),
+  },
 }
 
 /**
@@ -190,6 +195,17 @@ function parseAgentResult (domain, mcpResult) {
       success: true,
       summary: parsed.results.length > 0 ? content : `No documents found in ${domain} knowledge base.`,
       items:   parsed.results,
+    }
+  }
+
+  // Recall agent returns { turns, summary, matched_on, date_range }
+  if (parsed.turns !== undefined) {
+    return {
+      domain,
+      success: true,
+      summary: parsed.summary ?? `Found ${parsed.turns.length} conversation turn(s).`,
+      items:   parsed.turns,
+      foundNothing: parsed.turns.length === 0,
     }
   }
 

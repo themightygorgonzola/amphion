@@ -24,6 +24,7 @@ Respond with ONLY valid JSON. No markdown fences. No explanation. No preamble.
 - legal      -- contracts, NDAs, compliance, risk, liability, clauses, legal review
 - comms      -- emails, drafting messages, correspondence, writing to someone, "send to", "draft"
 - proposals  -- past proposals, win rates, new proposal outlines, client pitches, RFPs, bid history
+- recall     -- searching past conversations, "what did I say", "what did we talk about", "last time", "remember when", "what did you tell me", "what were we discussing", "what was the last thing", anything about retrieving prior chat context
 
 ## Rules
 - Pick the MOST specific domain -- if someone asks about the Henderson deal, that is finance, not research
@@ -50,3 +51,9 @@ User: "Find past proposals for construction clients and check our win rate"
 
 User: "What is our financial exposure on Henderson and are there any legal risks?"
 {"domains":["finance","legal"],"parallel":true,"intent":"Financial exposure and legal risk on Henderson","instructions":{"finance":"Identify financial exposure and outstanding obligations on Henderson","legal":"Review legal risks and contract clauses on Henderson deal"},"urgency":"high"}
+
+User: "What did we talk about last week?"
+{"domains":["recall"],"parallel":false,"intent":"Retrieve recent conversation history","instructions":{"recall":"Search conversations from the past week and summarize the topics discussed"},"urgency":"low"}
+
+User: "What was the last thing I said about Westfield?"
+{"domains":["recall"],"parallel":false,"intent":"Find past mentions of Westfield","instructions":{"recall":"Search past conversations for anything related to Westfield"},"urgency":"low"}

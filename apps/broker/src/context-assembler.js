@@ -8,7 +8,7 @@
  * will receive as structured context.
  */
 
-import { getUserContext, getRecentHistory } from './db.js'
+import { getUserContext, getRecentHistory, getGlobalRecentHistory } from './db.js'
 
 /**
  * Build the context packet for a given session.
@@ -27,10 +27,12 @@ import { getUserContext, getRecentHistory } from './db.js'
  * @property {string}   contextNotes
  * @property {{ role: string, content: string }[]} history
  * @property {string}   contextSummary  — formatted string ready to inject into a prompt
+ * @property {string}   recentActivitySummary — last few turns across all sessions
  */
 export function assembleContext (sessionId) {
   const user = getUserContext()
   const history = getRecentHistory(sessionId, 10)
+  const globalRecent = getGlobalRecentHistory(6)
 
   const displayName = user.displayName ?? process.env.DISPLAY_NAME ?? 'Atlas'
 
@@ -62,10 +64,18 @@ export function assembleContext (sessionId) {
 
   const contextSummary = lines.length ? lines.join('\n') : '(no user profile configured — run scripts/seed-context.js)'
 
+  // Build a cross-session recent activity summary for dispatcher awareness
+  const recentActivitySummary = globalRecent.length
+    ? globalRecent.map(t =>
+        `  ${t.role === 'user' ? 'David' : 'Atlas'}: ${t.content?.slice(0, 120)}${t.content?.length > 120 ? '...' : ''}`
+      ).join('\n')
+    : ''
+
   return {
     ...user,
     displayName,
     history,
     contextSummary,
+    recentActivitySummary,
   }
 }
