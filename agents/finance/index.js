@@ -11,40 +11,14 @@
 
 import path from 'path'
 import { fileURLToPath } from 'url'
-import pg from 'pg'
 import { BaseAgent } from '../_base/index.js'
+import { initDb, getUserContext } from '../../apps/broker/src/db.js'
+import {
+  searchResourceChunks,
+  searchResourceSummaries,
+} from '../_shared/resource-retrieval.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
-
-const OLLAMA_HOST  = process.env.OLLAMA_HOST        ?? 'http://localhost:11434'
-const EMBED_MODEL  = process.env.OLLAMA_MODEL_EMBED  ?? 'nomic-embed-text'
-
-const { Pool } = pg
-
-let _pool = null
-function getPool () {
-  if (!_pool) {
-    _pool = new Pool({
-      host:     process.env.PGHOST     ?? 'localhost',
-      port:     parseInt(process.env.PGPORT ?? '5432', 10),
-      database: process.env.PGDATABASE ?? 'amphion',
-      user:     process.env.PGUSER     ?? 'amphion',
-      password: process.env.PGPASSWORD ?? 'changeme',
-      max: 3,
-    })
-  }
-  return _pool
-}
-
-async function embed (text) {
-  const res = await fetch(`${OLLAMA_HOST}/api/embed`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model: EMBED_MODEL, input: text }),
-  })
-  const data = await res.json()
-  return data.embeddings?.[0] ?? data.embedding
-}
 
 class FinanceAgent extends BaseAgent {
   get name () { return 'finance' }
@@ -53,8 +27,33 @@ class FinanceAgent extends BaseAgent {
   get tools () {
     return [
       {
+        name: 'search_documents',
+        description: 'Start here — broad probe across ingested finance documents. Finds which documents cover this topic using semantic similarity on summaries and keyword matching on titles. Zero results means no finance documents have been ingested yet.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            query: { type: 'string',  description: 'Natural language query about financial topics' },
+            k:     { type: 'integer', description: 'Number of documents (default 5, max 15)' },
+          },
+          required: ['query'],
+        },
+      },
+      {
+        name: 'search_hybrid',
+        description: 'Go deeper — chunk-level hybrid search (semantic + BM25 via RRF) across ingested finance documents. Use for precise factual questions or after search_documents identifies what is relevant. Searches the indexed finance knowledge base only.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            query:     { type: 'string',  description: 'Natural language search query' },
+            k:         { type: 'integer', description: 'Number of chunks (default 6, max 20)' },
+            neighbors: { type: 'boolean', description: 'Include neighboring chunks for context (default true)' },
+          },
+          required: ['query'],
+        },
+      },
+      {
         name: 'query_deals',
-        description: 'Get active deal information from the user context profile.',
+        description: 'Get current active deals and pipeline status from the user profile. Use for "what deals are active", "pipeline status", "current opportunities". Reads live profile data — does not search the knowledge base.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -62,84 +61,82 @@ class FinanceAgent extends BaseAgent {
           },
         },
       },
-      {
-        name: 'search_financials',
-        description: 'Semantic search within the finance domain of the knowledge base.',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            query: { type: 'string', description: 'Natural language query about financial topics' },
-            k:     { type: 'integer', description: 'Number of results (default 5)' },
-          },
-          required: ['query'],
-        },
-      },
     ]
   }
 
   async callTool (toolName, args) {
     switch (toolName) {
-      case 'query_deals':       return this._queryDeals(args)
-      case 'search_financials': return this._searchFinancials(args)
+      case 'search_documents': return this._searchDocuments(args)
+      case 'search_hybrid':    return this._searchHybrid(args)
+      case 'query_deals':      return this._queryDeals(args)
       default: throw new Error(`Unknown tool: ${toolName}`)
     }
   }
 
-  async _queryDeals ({ filter } = {}) {
-    this.log(`query_deals filter=${filter ?? 'none'}`)
-
-    // active_deals are passed through context in real calls, but we can also
-    // query from pgvector if documents have been ingested
-    const pool = getPool()
-
-    let sql = `
-      SELECT title, content, source_path, 1 - (embedding <=> $1::vector) AS score
-      FROM knowledge_items
-      WHERE domain = 'finance'
-      ORDER BY created_at DESC
-      LIMIT 10
-    `
-
-    // Fallback: just return the most recent finance documents if no embedding
-    try {
-      const { rows } = await pool.query(`
-        SELECT title, content, source_path, metadata, created_at
-        FROM knowledge_items
-        WHERE domain = 'finance'
-        ${filter ? `AND (title ILIKE $1 OR content ILIKE $1)` : ''}
-        ORDER BY created_at DESC
-        LIMIT 10
-      `, filter ? [`%${filter}%`] : [])
-
-      return JSON.stringify({ deals: rows, count: rows.length })
-    } catch {
-      return JSON.stringify({ deals: [], message: 'No finance documents ingested yet. Use scripts/ingest.js to add documents.' })
-    }
+  async _searchDocuments ({ query, k = 5 }) {
+    if (!query?.trim()) throw new Error('query is required')
+    k = Math.min(Math.max(1, k ?? 5), 15)
+    this.log(`search_documents: "${query.slice(0, 60)}" k=${k}`)
+    const merged = await searchResourceSummaries({ query, corpus: 'finance', k })
+    if (!merged.length) return JSON.stringify({ documents: [], message: 'No finance documents found. Ingest finance documents to populate this domain.' })
+    return JSON.stringify({
+      documents: merged.map(r => ({
+        doc_id:      r.doc_id,
+        resource_id: r.resource_id,
+        title:       r.title,
+        domain:      r.domain,
+        corpus:      r.corpus,
+        doc_type:    r.doc_type,
+        chunk_count: r.chunk_count,
+        rrf_score:   r.rrf_score,
+        summary:     r.summary ?? '(no summary)',
+        source_path: r.source_path,
+        metadata:    r.metadata,
+      })),
+    })
   }
 
-  async _searchFinancials ({ query, k = 5 }) {
+  async _searchHybrid ({ query, k = 6, neighbors = true }) {
     if (!query?.trim()) throw new Error('query is required')
-    k = Math.min(Math.max(1, k), 20)
+    k = Math.min(Math.max(1, k ?? 6), 20)
+    this.log(`search_hybrid: "${query.slice(0, 60)}" k=${k}`)
+    const results = await searchResourceChunks({ query, corpus: 'finance', k, neighbors })
+    if (!results.length) return JSON.stringify({ chunks: [], message: 'No finance content matched. Try search_documents to confirm what is available.' })
+    return JSON.stringify({ chunks: results })
+  }
 
-    this.log(`search_financials: "${query.slice(0, 60)}" k=${k}`)
-
-    const embedding = await embed(query)
-    const pool = getPool()
-    const vectorStr = `[${embedding.join(',')}]`
-
+  async _queryDeals ({ filter } = {}) {
+    this.log(`query_deals filter=${filter ?? 'none'}`)
     try {
-      const { rows } = await pool.query(`
-        SELECT title, content, source_path,
-               1 - (embedding <=> $1::vector) AS score
-        FROM knowledge_items
-        WHERE domain = 'finance'
-        ORDER BY embedding <=> $1::vector
-        LIMIT $2
-      `, [vectorStr, k])
-
-      return JSON.stringify({ results: rows.map(r => ({ ...r, score: parseFloat(r.score).toFixed(3) })) })
-    } catch {
-      return JSON.stringify({ results: [], message: 'No finance documents ingested yet.' })
+      await initDb()
+      let deals = getUserContext().activeDeals ?? []
+      if (filter) {
+        const f = filter.toLowerCase()
+        deals = deals.filter(d => JSON.stringify(d).toLowerCase().includes(f))
+      }
+      if (!deals.length) {
+        const docs = await searchResourceSummaries({
+          query: filter?.trim() ? filter : 'active deals pipeline budget finance',
+          corpus: 'finance',
+          k: 10,
+        })
+        return JSON.stringify({
+          deals: docs.map(doc => ({
+            resource_id: doc.resource_id,
+            doc_id:      doc.doc_id,
+            title:       doc.title,
+            summary:     doc.summary,
+            source_path: doc.source_path,
+            metadata:    doc.metadata,
+            created_at:  doc.created_at,
+          })),
+          source: 'resources',
+          count: docs.length,
+        })
+      }
+      return JSON.stringify({ deals, source: 'user_context', count: deals.length })
+    } catch (err) {
+      return JSON.stringify({ deals: [], error: err.message })
     }
   }
 }

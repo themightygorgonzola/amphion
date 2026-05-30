@@ -8,21 +8,33 @@
     "agents/*"
   ],
   "scripts": {
+    "start": "node scripts/start.js",
+    "start:no-restart": "node scripts/start.js --no-restart",
+    "start:headless": "node scripts/start.js --headless",
     "dev": "docker compose -f infra/docker-compose.dev.yml up",
     "dev:down": "docker compose -f infra/docker-compose.dev.yml down",
     "dev:build": "docker compose -f infra/docker-compose.dev.yml up --build",
     "migrate": "node scripts/migrate.js",
     "ingest": "node scripts/ingest.js",
+    "reset": "node scripts/reset.js",
+    "download-rcw": "node scripts/download-rcw.js",
+    "ingest-rcw": "node scripts/ingest.js --dir data/rcw --domain legal --no-summary",
     "seed": "node scripts/seed-context.js",
     "broker": "node apps/broker/src/index.js",
     "broker:dev": "nodemon apps/broker/src/index.js",
-    "desktop": "node_modules/electron/dist/electron.exe apps/desktop/src/main.js",
-    "desktop:dev": "node_modules/electron/dist/electron.exe apps/desktop/src/main.js --dev",
+    "stage-watch": "node scripts/stage-watch.js",
+    "watch-ingest": "node scripts/watch-ingest.js",
+    "debug-query": "node scripts/debug-query.js",
+    "desktop": "npx --no electron apps/desktop/src/main.js",
+    "desktop:dev": "npx --no electron apps/desktop/src/main.js --dev",
     "lint": "eslint .",
     "format": "prettier --write ."
   },
   "dependencies": {
-    "pg": "^8.12.0"
+    "@mozilla/readability": "^0.6.0",
+    "jsdom": "^29.1.1",
+    "pg": "^8.12.0",
+    "turndown": "^7.2.4"
   },
   "devDependencies": {
     "eslint": "^9.0.0",

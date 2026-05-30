@@ -14,6 +14,7 @@ import { getUserContext, getRecentHistory, getGlobalRecentHistory } from './db.j
  * Build the context packet for a given session.
  *
  * @param {string} sessionId
+ * @param {string} [userId]   — who is asking; scopes all history lookups
  * @returns {ContextPacket}
  *
  * @typedef {Object} ContextPacket
@@ -29,10 +30,11 @@ import { getUserContext, getRecentHistory, getGlobalRecentHistory } from './db.j
  * @property {string}   contextSummary  — formatted string ready to inject into a prompt
  * @property {string}   recentActivitySummary — last few turns across all sessions
  */
-export function assembleContext (sessionId) {
+export function assembleContext (sessionId, userId = 'default', workspaceId = null) {
   const user = getUserContext()
-  const history = getRecentHistory(sessionId, 10)
-  const globalRecent = getGlobalRecentHistory(6)
+  const history = getRecentHistory(sessionId, 10, userId)
+  const globalRecent = getGlobalRecentHistory(6, userId, workspaceId)
+  const activeScope = `${workspaceId ?? ''}`.trim() || null
 
   const displayName = user.displayName ?? process.env.DISPLAY_NAME ?? 'Atlas'
 
@@ -74,6 +76,8 @@ export function assembleContext (sessionId) {
   return {
     ...user,
     displayName,
+    workspaceId: activeScope,
+    activeScope,
     history,
     contextSummary,
     recentActivitySummary,

@@ -39,7 +39,26 @@ data/*.db
 data/*.db-shm
 data/*.db-wal
 data/*.sqlite
+data/traces/
 
 # Electron packaged output
 apps/desktop/out/
 apps/desktop/dist/
+
+# Runtime data (not source)
+data/.pm2/
+data/staging/
+data/artifacts/
+data/rcw/
+data/reload-renderer.flag
+memories/
+
+# Editor
+.vscode/
+notespaceworkspace.code-workspace
+
+# Test output
+*.ndjson
+
+# Temp files at root
+/2

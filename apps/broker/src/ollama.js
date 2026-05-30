@@ -1,81 +1,81 @@
 /**
- * broker/src/ollama.js — Thin Ollama HTTP client
+ * broker/src/ollama.js — LiteLLM inference client (OpenAI-compatible)
  *
- * Wraps POST /api/chat and POST /api/embed.
- * Handles both streaming (token-by-token) and non-streaming (full response).
+ * Routes all broker inference through LiteLLM (:4000), which speaks the
+ * OpenAI protocol and dispatches to local Ollama models or cloud fallback.
  *
- * All inference calls in the broker go through this module so there's
- * one place to add retries, logging, and model routing later.
+ * Function signatures are unchanged — dispatcher, agent-runner, voice-layer
+ * call this exactly as before.
  */
 
-const OLLAMA_HOST = () => process.env.OLLAMA_HOST ?? 'http://localhost:11434'
+const LLM_HOST = () => process.env.LITELLM_HOST ?? 'http://localhost:4000'
+const LLM_KEY  = () => process.env.LITELLM_KEY  ?? ''
+
+const authHeaders = () => ({
+  'Content-Type': 'application/json',
+  Authorization: `Bearer ${LLM_KEY()}`,
+})
 
 // ---------------------------------------------------------------------------
 // callOllama — used by Dispatcher (non-streaming) and Voice Layer (streaming)
 // ---------------------------------------------------------------------------
 
 /**
- * Call Ollama /api/chat.
+ * Call LiteLLM /v1/chat/completions.
  *
  * @param {object} opts
- * @param {string}   opts.model
+ * @param {string}   opts.model          — LiteLLM model alias (fast/balanced/voice/tiny)
  * @param {string}   opts.systemPrompt
  * @param {string}   opts.userMessage
- * @param {boolean}  [opts.stream=false]  — if true, returns an async generator
+ * @param {boolean}  [opts.stream=false] — if true, returns an async generator
  * @param {{ role:string, content:string }[]} [opts.history=[]]
+ * @param {number}   [opts.numPredict]   — maps to max_tokens
+ * @param {string}   [opts.format]       — 'json' → response_format: json_object
+ * @param {number}   [opts.timeoutMs]
  * @returns {Promise<string>|AsyncGenerator<string>}
- *   Non-streaming: resolves to full response string
- *   Streaming:     async generator yielding token strings
  */
-export async function callOllama ({ model, systemPrompt, userMessage, stream = false, history = [] }) {
+export async function callOllama ({ model, systemPrompt, userMessage, stream = false, history = [], numPredict, format, timeoutMs }) {
   const messages = [
     { role: 'system', content: systemPrompt },
     ...history,
     { role: 'user', content: userMessage },
   ]
 
-  // Disable chain-of-thought thinking for models that support it (qwen3).
-  // This prevents <think>...</think> tokens from polluting JSON dispatcher output.
-  const body = JSON.stringify({ model, messages, stream, think: false })
+  const payload = { model, messages, stream }
+  if (numPredict)        payload.max_tokens      = numPredict
+  if (format === 'json') payload.response_format = { type: 'json_object' }
 
-  const res = await fetch(`${OLLAMA_HOST()}/api/chat`, {
+  const fetchOpts = {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body,
-  })
+    headers: authHeaders(),
+    body: JSON.stringify(payload),
+  }
+  if (timeoutMs) fetchOpts.signal = AbortSignal.timeout(timeoutMs)
+
+  const res = await fetch(`${LLM_HOST()}/v1/chat/completions`, fetchOpts)
 
   if (!res.ok) {
     const text = await res.text().catch(() => res.statusText)
-    throw new Error(`[ollama] POST /api/chat returned ${res.status}: ${text}`)
+    throw new Error(`[llm] POST /v1/chat/completions returned ${res.status}: ${text}`)
   }
 
   if (!stream) {
-    // Non-streaming: read the entire NDJSON response and concatenate message content
-    const text = await res.text()
-    let fullContent = ''
-    for (const line of text.trim().split('\n')) {
-      if (!line.trim()) continue
-      try {
-        const chunk = JSON.parse(line)
-        fullContent += chunk?.message?.content ?? ''
-      } catch { /* skip malformed lines */ }
-    }
-    return fullContent.trim()
+    const data = await res.json()
+    return (data.choices?.[0]?.message?.content ?? '').trim()
   }
 
-  // Streaming: return an async generator that yields token strings
-  return streamTokens(res.body)
+  return streamTokensSSE(res.body)
 }
 
 /**
- * Async generator — reads NDJSON from a fetch response body and yields tokens.
+ * Async generator — reads OpenAI SSE stream and yields content delta strings.
  * @param {ReadableStream} body
  * @yields {string}
  */
-async function* streamTokens (body) {
-  const reader = body.getReader()
+async function* streamTokensSSE (body) {
+  const reader  = body.getReader()
   const decoder = new TextDecoder()
-  let buffer = ''
+  let buffer    = ''
 
   try {
     while (true) {
@@ -84,16 +84,17 @@ async function* streamTokens (body) {
 
       buffer += decoder.decode(value, { stream: true })
       const lines = buffer.split('\n')
-      buffer = lines.pop() // keep incomplete trailing line in buffer
+      buffer = lines.pop() // keep incomplete trailing line
 
       for (const line of lines) {
-        if (!line.trim()) continue
+        const trimmed = line.trim()
+        if (!trimmed || trimmed === 'data: [DONE]') continue
+        if (!trimmed.startsWith('data: ')) continue
         try {
-          const chunk = JSON.parse(line)
-          const token = chunk?.message?.content
+          const chunk = JSON.parse(trimmed.slice(6))
+          const token = chunk.choices?.[0]?.delta?.content
           if (token) yield token
-          if (chunk?.done) return
-        } catch { /* skip malformed lines */ }
+        } catch { /* skip malformed */ }
       }
     }
   } finally {
@@ -102,31 +103,107 @@ async function* streamTokens (body) {
 }
 
 // ---------------------------------------------------------------------------
-// embed — generate a vector embedding for a text string
+// callOllamaTools — ReAct tool-calling loop
 // ---------------------------------------------------------------------------
 
 /**
- * Get an embedding vector from Ollama.
+ * Agentic call with tool use via /v1/chat/completions.
+ *
+ * Sends messages + tools, intercepts tool_calls, executes them via
+ * executeTool, reinjects results, and continues until the model gives a
+ * final text response or maxRounds is reached.
+ *
+ * Yields:
+ *   { type: 'token', token: string }          — final narration content
+ *   { type: 'tool_call', name, args, result }  — each tool invocation
+ *
+ * @param {object}   opts
+ * @param {string}   opts.model
+ * @param {{ role: string, content: string }[]} opts.messages
+ * @param {object[]} opts.tools
+ * @param {(name: string, args: object) => Promise<string>} opts.executeTool
+ * @param {number}   [opts.maxRounds=6]
+ * @param {number}   [opts.numPredict]
+ */
+export async function* callOllamaTools ({ model, messages, tools, executeTool, maxRounds = 6, numPredict }) {
+  let msgs = [...messages]
+
+  for (let round = 0; round < maxRounds; round++) {
+    const payload = { model, messages: msgs, stream: false, tools }
+    if (numPredict) payload.max_tokens = numPredict
+
+    const res = await fetch(`${LLM_HOST()}/v1/chat/completions`, {
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify(payload),
+    })
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => res.statusText)
+      throw new Error(`[llm] tools call returned ${res.status}: ${text}`)
+    }
+
+    const data = await res.json()
+    const msg  = data.choices?.[0]?.message
+
+    if (msg?.tool_calls?.length) {
+      msgs.push({ role: 'assistant', content: msg.content ?? '', tool_calls: msg.tool_calls })
+
+      for (const tc of msg.tool_calls) {
+        const name = tc.function?.name ?? ''
+        // OpenAI sends arguments as a JSON string; Ollama-via-LiteLLM may send object
+        let args
+        try {
+          const raw = tc.function?.arguments ?? '{}'
+          args = typeof raw === 'string' ? JSON.parse(raw) : raw
+        } catch { args = {} }
+        // Strip nil sentinels sometimes injected by Ollama tool-call path
+        if (typeof args === 'object' && args !== null) {
+          args = Object.fromEntries(Object.entries(args).filter(([, v]) => v !== '<nil>'))
+        }
+
+        const result = await executeTool(name, args)
+        yield { type: 'tool_call', name, args, result }
+        // tool_call_id is required by OpenAI spec; may be absent from Ollama backend
+        const toolMsg = { role: 'tool', content: result }
+        if (tc.id) toolMsg.tool_call_id = tc.id
+        msgs.push(toolMsg)
+      }
+
+      continue
+    }
+
+    const content = msg?.content ?? ''
+    if (content) yield { type: 'token', token: content }
+    break
+  }
+}
+
+// ---------------------------------------------------------------------------
+// embed — generate a vector embedding
+// ---------------------------------------------------------------------------
+
+/**
+ * Get an embedding vector via LiteLLM /v1/embeddings.
  * @param {string} text
  * @returns {Promise<number[]>}  — 768-dimensional float array
  */
 export async function embed (text) {
-  const model = process.env.OLLAMA_MODEL_EMBED ?? 'nomic-embed-text'
+  const model = process.env.OLLAMA_MODEL_EMBED ?? 'embed'
 
-  const res = await fetch(`${OLLAMA_HOST()}/api/embed`, {
+  const res = await fetch(`${LLM_HOST()}/v1/embeddings`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: authHeaders(),
     body: JSON.stringify({ model, input: text }),
   })
 
   if (!res.ok) {
     const errText = await res.text().catch(() => res.statusText)
-    throw new Error(`[ollama] POST /api/embed returned ${res.status}: ${errText}`)
+    throw new Error(`[llm] POST /v1/embeddings returned ${res.status}: ${errText}`)
   }
 
   const data = await res.json()
-  // Ollama returns { embeddings: [[...]] } for the /api/embed endpoint
-  const embedding = data?.embeddings?.[0] ?? data?.embedding
-  if (!embedding) throw new Error('[ollama] embed response missing embeddings field')
+  const embedding = data.data?.[0]?.embedding
+  if (!embedding) throw new Error('[llm] embed response missing data[0].embedding')
   return embedding
 }
