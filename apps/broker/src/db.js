@@ -175,6 +175,28 @@ function initSqlite () {
     CREATE INDEX IF NOT EXISTS staged_files_learn_plan_idx
       ON staged_files (learn_plan_id, submitted_at DESC)
   `)
+
+  // workspace_registry — one row per project/repo under C:\MySoftwareFolder
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS workspace_registry (
+      id           TEXT PRIMARY KEY,
+      name         TEXT NOT NULL,
+      path         TEXT NOT NULL,
+      description  TEXT,
+      language     TEXT,
+      build_cmd    TEXT,
+      conventions  TEXT,
+      key_dirs     TEXT,
+      ppm_service  TEXT,
+      tags         TEXT,
+      active       INTEGER NOT NULL DEFAULT 1,
+      created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS workspace_registry_active_idx
+      ON workspace_registry (active, name);
+  `)
+
   console.log(`[db] SQLite ready at ${dbPath}`)
 }
 
@@ -431,6 +453,73 @@ export async function getArtifactById (id) {
 function safeParseJson (str, fallback) {
   if (!str) return fallback
   try { return JSON.parse(str) } catch { return fallback }
+}
+
+// ---------------------------------------------------------------------------
+// Workspace Registry
+// ---------------------------------------------------------------------------
+
+function parseWorkspaceRow (row) {
+  if (!row) return null
+  return {
+    id:          row.id,
+    name:        row.name,
+    path:        row.path,
+    description: row.description,
+    language:    row.language,
+    buildCmd:    row.build_cmd,
+    conventions: safeParseJson(row.conventions, []),
+    keyDirs:     safeParseJson(row.key_dirs, []),
+    ppmService:  row.ppm_service,
+    tags:        safeParseJson(row.tags, []),
+    active:      !!row.active,
+    createdAt:   row.created_at,
+    updatedAt:   row.updated_at,
+  }
+}
+
+/** Get one workspace by ID. Returns null if not found. */
+export function getWorkspaceInfo (workspaceId) {
+  const db = getSqlite()
+  return parseWorkspaceRow(
+    db.prepare('SELECT * FROM workspace_registry WHERE id = ? AND active = 1').get(workspaceId)
+  )
+}
+
+/** Get all active workspaces ordered by name. */
+export function getAllWorkspaces () {
+  const db = getSqlite()
+  return db.prepare('SELECT * FROM workspace_registry WHERE active = 1 ORDER BY name').all()
+    .map(parseWorkspaceRow)
+}
+
+/** Insert or update a workspace entry. */
+export function upsertWorkspace (ws) {
+  const db = getSqlite()
+  db.prepare(`
+    INSERT INTO workspace_registry
+      (id, name, path, description, language, build_cmd, conventions, key_dirs, ppm_service, tags, active, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, datetime('now'))
+    ON CONFLICT(id) DO UPDATE SET
+      name        = excluded.name,
+      path        = excluded.path,
+      description = excluded.description,
+      language    = excluded.language,
+      build_cmd   = excluded.build_cmd,
+      conventions = excluded.conventions,
+      key_dirs    = excluded.key_dirs,
+      ppm_service = excluded.ppm_service,
+      tags        = excluded.tags,
+      active      = 1,
+      updated_at  = datetime('now')
+  `).run(
+    ws.id, ws.name, ws.path, ws.description ?? null, ws.language ?? null,
+    ws.buildCmd ?? null,
+    JSON.stringify(ws.conventions ?? []),
+    JSON.stringify(ws.keyDirs ?? []),
+    ws.ppmService ?? null,
+    JSON.stringify(ws.tags ?? [])
+  )
 }
 
 function parseLearnPlanRow (row) {

@@ -1,72 +1,67 @@
 /**
  * broker/src/context-assembler.js — Stage 1
  *
- * Builds the context packet that gets prepended to EVERY inference call.
+ * Builds the context packet prepended to every inference call.
  * No LLM involved — purely reading from SQLite.
  *
- * Returns an object that both the Dispatcher prompt and Voice Layer prompt
- * will receive as structured context.
+ * When a workspaceId is supplied the summary is scoped to that workspace.
+ * Without one, a compact list of all registered workspaces is included.
  */
 
-import { getUserContext, getRecentHistory, getGlobalRecentHistory } from './db.js'
+import { getWorkspaceInfo, getAllWorkspaces, getRecentHistory, getGlobalRecentHistory } from './db.js'
 
 /**
- * Build the context packet for a given session.
- *
- * @param {string} sessionId
- * @param {string} [userId]   — who is asking; scopes all history lookups
- * @returns {ContextPacket}
- *
  * @typedef {Object} ContextPacket
- * @property {string}   displayName
- * @property {string}   company
- * @property {string}   role
- * @property {string[]} currentPriorities
- * @property {object[]} activeDeals
- * @property {object[]} keyContacts
- * @property {string}   tonePreferences
- * @property {string}   contextNotes
+ * @property {string}        displayName
+ * @property {string|null}   workspaceId
+ * @property {string|null}   activeScope
+ * @property {object|null}   workspace       — full WorkspaceInfo for the active workspace
+ * @property {object[]|null} allWorkspaces   — set when no workspaceId supplied
  * @property {{ role: string, content: string }[]} history
- * @property {string}   contextSummary  — formatted string ready to inject into a prompt
- * @property {string}   recentActivitySummary — last few turns across all sessions
+ * @property {string}        contextSummary  — prompt-ready string
+ * @property {string}        recentActivitySummary
  */
 export function assembleContext (sessionId, userId = 'default', workspaceId = null) {
-  const user = getUserContext()
-  const history = getRecentHistory(sessionId, 10, userId)
-  const globalRecent = getGlobalRecentHistory(6, userId, workspaceId)
   const activeScope = `${workspaceId ?? ''}`.trim() || null
 
-  const displayName = user.displayName ?? process.env.DISPLAY_NAME ?? 'Atlas'
+  const workspace     = activeScope ? getWorkspaceInfo(activeScope) : null
+  const allWorkspaces = activeScope ? null : getAllWorkspaces()
 
-  // Build a compact prompt-ready summary of who the user is
+  const history      = getRecentHistory(sessionId, 10, userId)
+  const globalRecent = getGlobalRecentHistory(6, userId, activeScope)
+
+  // Build a compact prompt-ready workspace summary
   const lines = []
+  lines.push('Developer: David | Home machine (miracle) | Windows 11 + RTX 5080')
 
-  if (user.company || user.role) {
-    lines.push(`User: ${[user.displayName, user.role, user.company].filter(Boolean).join(' | ')}`)
+  if (workspace) {
+    lines.push(`Active workspace: ${workspace.name}  [${workspace.path}]`)
+    if (workspace.description) lines.push(`  ${workspace.description}`)
+    if (workspace.language)    lines.push(`  Language: ${workspace.language}`)
+    if (workspace.buildCmd)    lines.push(`  Build: ${workspace.buildCmd}`)
+    if (workspace.ppmService)  lines.push(`  PPM service: ${workspace.ppmService}`)
+    if (workspace.conventions?.length) {
+      lines.push(`  Conventions: ${workspace.conventions.join('; ')}`)
+    }
+    if (workspace.keyDirs?.length) {
+      lines.push('  Key directories:')
+      workspace.keyDirs.forEach(d => {
+        const label = typeof d === 'string' ? d : `${d.path}: ${d.description}`
+        lines.push(`    ${label}`)
+      })
+    }
+  } else if (allWorkspaces?.length) {
+    lines.push(`Registered workspaces (${allWorkspaces.length}):`)
+    allWorkspaces.forEach(w => {
+      const lang = w.language ? ` [${w.language}]` : ''
+      lines.push(`  • ${w.id}${lang} — ${w.description ?? w.name}`)
+    })
+  } else {
+    lines.push('(no workspace registry — run scripts/seed-workspaces.js)')
   }
 
-  if (user.currentPriorities?.length) {
-    lines.push(`Current priorities: ${user.currentPriorities.join('; ')}`)
-  }
+  const contextSummary = lines.join('\n')
 
-  if (user.activeDeals?.length) {
-    const dealSummary = user.activeDeals
-      .map(d => `${d.name} (${d.stage}, ${d.value ?? '?'})`)
-      .join('; ')
-    lines.push(`Active deals: ${dealSummary}`)
-  }
-
-  if (user.tonePreferences) {
-    lines.push(`Tone: ${user.tonePreferences}`)
-  }
-
-  if (user.contextNotes) {
-    lines.push(`Notes: ${user.contextNotes}`)
-  }
-
-  const contextSummary = lines.length ? lines.join('\n') : '(no user profile configured — run scripts/seed-context.js)'
-
-  // Build a cross-session recent activity summary for dispatcher awareness
   const recentActivitySummary = globalRecent.length
     ? globalRecent.map(t =>
         `  ${t.role === 'user' ? 'David' : 'Atlas'}: ${t.content?.slice(0, 120)}${t.content?.length > 120 ? '...' : ''}`
@@ -74,10 +69,11 @@ export function assembleContext (sessionId, userId = 'default', workspaceId = nu
     : ''
 
   return {
-    ...user,
-    displayName,
+    displayName: 'David',
     workspaceId: activeScope,
     activeScope,
+    workspace,
+    allWorkspaces,
     history,
     contextSummary,
     recentActivitySummary,

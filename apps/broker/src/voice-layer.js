@@ -52,11 +52,11 @@ export async function synthesize (agentResults, originalMessage, context, jobTic
   const directGeneratedReply = buildDirectGeneratedReply(agentResults, jobTicket)
   if (directGeneratedReply) return directGeneratedReply
 
-  const verificationLimitedReply = buildVerificationLimitedReply(agentResults, jobTicket)
+  const verificationLimitedReply = buildVerificationLimitedReply(agentResults, jobTicket, context)
   if (verificationLimitedReply) return verificationLimitedReply
 
   const basePrompt = loadVoicePrompt()
-  const systemPrompt = buildSystemPrompt(basePrompt, agentResults)
+  const systemPrompt = buildSystemPrompt(basePrompt, agentResults, context)
 
   const response = await callOllama({
     model: process.env.OLLAMA_MODEL_VOICE ?? process.env.OLLAMA_MODEL_PRIMARY ?? 'llama3.3:70b',
@@ -105,7 +105,7 @@ export async function synthesizeStream (agentResults, originalMessage, context, 
     return (async function * () { yield directGeneratedReply })()
   }
 
-  const verificationLimitedReply = buildVerificationLimitedReply(agentResults, jobTicket)
+  const verificationLimitedReply = buildVerificationLimitedReply(agentResults, jobTicket, context)
   const basePrompt = loadVoicePrompt()
   const model = process.env.OLLAMA_MODEL_VOICE ?? process.env.OLLAMA_MODEL_PRIMARY ?? 'llama3.3:70b'
 
@@ -113,7 +113,7 @@ export async function synthesizeStream (agentResults, originalMessage, context, 
   const artifactItems = collectArtifacts(agentResults)
   if (artifactItems.length > 0) {
     const t0 = Date.now()
-    const systemPrompt = buildSystemPrompt(basePrompt, agentResults)
+    const systemPrompt = buildSystemPrompt(basePrompt, agentResults, context)
     const numPredict = lengthToTokens(jobTicket?.responseLength)
     trace?.stage('voice', { model, mode: 'artifact-cards', cardCount: artifactItems.length })
 
@@ -336,7 +336,7 @@ export async function synthesizeStream (agentResults, originalMessage, context, 
   }
 
   // --- Standard streaming path ---
-  const systemPrompt = buildSystemPrompt(basePrompt, agentResults)
+  const systemPrompt = buildSystemPrompt(basePrompt, agentResults, context)
   const numPredict = lengthToTokens(jobTicket?.responseLength)
   const t0 = Date.now()
 
@@ -503,9 +503,13 @@ function cleanFileDescription (text) {
  * The retrieved content lives in the SYSTEM role so the LLM treats it as
  * internal knowledge, not as text the user pasted in.
  */
-function buildSystemPrompt (voicePrompt, agentResults) {
+function buildSystemPrompt (voicePrompt, agentResults, context = {}) {
   const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })
   const resultLines = [`[CURRENT DATE: ${today}]`]
+
+  if (context?.contextSummary) {
+    resultLines.push(`[WORKSPACE CONTEXT — authoritative factual data from the workspace registry, use this to answer questions about project location, structure, build commands, and conventions even when the knowledge base has no results]\n${context.contextSummary}`)
+  }
 
   for (const [domain, result] of Object.entries(agentResults)) {
     if (domain === '_meta') continue
@@ -768,8 +772,12 @@ function buildDirectGeneratedReply (agentResults, jobTicket) {
   return outputs.join('\n\n')
 }
 
-function buildVerificationLimitedReply (agentResults, jobTicket) {
+function buildVerificationLimitedReply (agentResults, jobTicket, context = {}) {
   if (jobTicket?.modality === 'draft') return null
+
+  // If workspace context is loaded, let the voice model answer from it rather than
+  // returning a canned no-evidence message — the contextSummary may contain the answer.
+  if (context?.contextSummary) return null
 
   const verifiableResults = Object.values(agentResults ?? {}).filter(result => result?.verification)
   if (verifiableResults.length === 0) return null

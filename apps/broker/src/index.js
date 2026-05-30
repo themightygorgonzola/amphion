@@ -38,6 +38,7 @@ import {
   getLearnPlanById,
   getLearnPlans,
   getStagedFilesByLearnPlanId,
+  getAllWorkspaces,
 } from './db.js'
 import { recordScopeResourceHits } from './scope-experience.js'
 import { Trace } from './tracer.js'
@@ -1554,6 +1555,14 @@ app.post('/ingest', async (req, res) => {
     console.error('[broker] /ingest error:', err.message)
     res.status(500).json({ ok: false, error: err.message })
   }
+})
+
+// ---------------------------------------------------------------------------
+// GET /workspaces
+// ---------------------------------------------------------------------------
+app.get('/workspaces', (req, res) => {
+  const workspaces = getAllWorkspaces()
+  res.json({ workspaces })
 })
 
 // ---------------------------------------------------------------------------
