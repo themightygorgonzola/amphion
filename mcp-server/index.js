@@ -19,7 +19,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 
-const BROKER_URL       = (process.env.AMPHION_BROKER_URL  ?? 'http://localhost:3000').replace(/\/$/, '');
+const BROKER_URL       = (process.env.AMPHION_BROKER_URL  ?? 'http://localhost:3001').replace(/\/$/, '');
 const BROKER_KEY       = process.env.AMPHION_BROKER_KEY  ?? '';
 const PPM_URL          = (process.env.PPM_URL             ?? 'http://localhost:7000').replace(/\/$/, '');
 // Default workspace scope for this MCP instance — set per VS Code workspace via .continue/config.yaml
