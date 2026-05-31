@@ -52,7 +52,7 @@ app.use(express.json())
 const BROKER_API_KEY = process.env.BROKER_API_KEY
 if (BROKER_API_KEY) {
   app.use((req, res, next) => {
-    if (req.path === '/health') return next()
+    if (req.path === '/health' || req.path === '/context') return next()
     const auth = req.headers.authorization ?? ''
     if (!auth.startsWith('Bearer ') || auth.slice(7) !== BROKER_API_KEY) {
       return res.status(401).json({ error: 'Unauthorized' })
@@ -973,6 +973,23 @@ app.post('/ingest', async (req, res) => {
 app.get('/workspaces', (req, res) => {
   const workspaces = getAllWorkspaces()
   res.json({ workspaces })
+})
+
+// ---------------------------------------------------------------------------
+// GET /context — lightweight context fetch for LiteLLM callback enrichment.
+// Returns assembleContext() data without triggering LLM inference.
+// Auth-exempt (localhost-only, non-sensitive workspace metadata).
+// ---------------------------------------------------------------------------
+app.get('/context', (req, res) => {
+  const sessionId   = `${req.query.sessionId   ?? 'default'}`
+  const userId      = `${req.query.userId      ?? 'default'}`
+  const workspaceId = req.query.workspaceId ?? null
+  const ctx = assembleContext(sessionId, userId, workspaceId)
+  res.json({
+    contextSummary:        ctx.contextSummary,
+    recentActivitySummary: ctx.recentActivitySummary,
+    displayName:           ctx.displayName,
+  })
 })
 
 // ---------------------------------------------------------------------------

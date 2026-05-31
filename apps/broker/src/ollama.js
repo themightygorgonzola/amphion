@@ -41,7 +41,7 @@ export async function callOllama ({ model, systemPrompt, userMessage, stream = f
     { role: 'user', content: userMessage },
   ]
 
-  const payload = { model, messages, stream }
+  const payload = { model, messages, stream, metadata: { no_context: true } }
   if (numPredict)        payload.max_tokens      = numPredict
   if (format === 'json') payload.response_format = { type: 'json_object' }
 
