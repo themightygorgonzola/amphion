@@ -1,16 +1,12 @@
 /**
  * broker/src/index.js — Amphion Broker
  *
- * The central pipeline. Every user message passes through four layers:
- *   1. Context Assembler  — reads SQLite, builds context packet (no LLM call)
- *   2. Dispatcher         — one fast LLM call, outputs a JSON job ticket
- *   3. Orchestrator       — pure logic, executes the plan (calls agents)
- *   4. Voice Layer        — one final LLM call, writes unified JARVIS response
- *
- * Routes:
+ * Simple memory + ingest service. Routes:
  *   POST /query     — accepts { message, sessionId? }, streams response via SSE
- *   GET  /health    — returns { ok: true }
  *   POST /ingest    — ingest a single file directly into the corpus
+ *   POST /stage     — quarantine intake endpoint (downloads + uploads)
+ *   POST /learn     — create/update inline learn plans, stage sources
+ *   GET  /health    — returns { ok: true }
  */
 
 import { config as loadEnv } from 'dotenv'
@@ -21,9 +17,7 @@ import path from 'path'
 import fs from 'fs'
 import { fileURLToPath, pathToFileURL } from 'url'
 import { assembleContext } from './context-assembler.js'
-import { dispatch } from './dispatcher.js'
-import { orchestrate } from './orchestrator.js'
-import { synthesizeStream } from './voice-layer.js'
+import { callOllama } from './ollama.js'
 import {
   initDb,
   saveConversationTurn,
@@ -40,8 +34,6 @@ import {
   getStagedFilesByLearnPlanId,
   getAllWorkspaces,
 } from './db.js'
-import { recordScopeResourceHits } from './scope-experience.js'
-import { Trace } from './tracer.js'
 import { htmlToMarkdown, ingestFile } from '../../../scripts/_ingest-lib.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -78,151 +70,8 @@ const TRANSIENT_DOWNLOAD_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504])
 // Filesystem result_item helpers
 // ---------------------------------------------------------------------------
 
-/**
- * Build typed result_item payloads from a filesystem agent result.
- * Each item corresponds to one tool call (browse_path, find_path, or read_file).
- * These are emitted as SSE events BEFORE voice synthesis so the UI can render
- * them directly without the LLM narrating the raw data.
- */
-function buildFilesystemItems (result) {
-  const raw = result.filesystemRaw ?? {}
-  if (raw.observations?.length) {
-    return raw.observations.map(o => _singleFsItem(o.tool, o.raw)).filter(Boolean)
-  }
-  return [_singleFsItem(raw.tool, raw)].filter(Boolean)
-}
-
-function _singleFsItem (tool, raw) {
-  if (!raw) return null
-  if (tool === 'browse_path') {
-    const entries = (raw.entries ?? []).filter(e => e.name !== 'node_modules' && !e.name.startsWith('.'))
-    return { kind: 'fs_dir', path: raw.path, entries, totalEntries: raw.entries?.length ?? 0 }
-  }
-  if (tool === 'find_path') {
-    return { kind: 'fs_find', query: raw.query, results: raw.results ?? [], roots: raw.roots ?? [] }
-  }
-  if (tool === 'read_file' && raw.content) {
-    return { kind: 'fs_file', path: raw.path, content: raw.content, truncated: raw.truncated ?? false, size: raw.size }
-  }
-  return null
-}
-
-function writeSse (res, type, payload = {}) {
-  res.write(`data: ${JSON.stringify({ type, ...payload })}\n\n`)
-}
-
-function nowIso () {
-  return new Date().toISOString()
-}
-
 function normalizeText (value) {
   return `${value ?? ''}`.trim()
-}
-
-function joinMeta (...parts) {
-  return parts.map(normalizeText).filter(Boolean).join(' · ')
-}
-
-function collectScopeResourceIds (agentResults) {
-  const resourceIds = new Set()
-
-  for (const result of Object.values(agentResults ?? {})) {
-    if (!result || result.success === false || result.foundNothing || result.isFilesystem || result.isArtifacts) continue
-    if (result.verification?.verdict !== 'supported') continue
-    const credited = result.resourceAttribution?.creditedResourceIds
-    if (Array.isArray(credited) && credited.length > 0) {
-      for (const value of credited) {
-        const numeric = Number.parseInt(`${value ?? ''}`, 10)
-        if (Number.isInteger(numeric) && numeric > 0) resourceIds.add(numeric)
-      }
-      continue
-    }
-
-    for (const item of result.items ?? []) {
-      if (item?.is_neighbor) continue
-      const numeric = Number.parseInt(`${item?.resource_id ?? item?.doc_id ?? ''}`, 10)
-      if (Number.isInteger(numeric) && numeric > 0) resourceIds.add(numeric)
-    }
-  }
-
-  return [...resourceIds]
-}
-
-function compactObject (value) {
-  return Object.fromEntries(
-    Object.entries(value).filter(([, item]) => {
-      if (item == null) return false
-      if (Array.isArray(item)) return item.length > 0
-      if (typeof item === 'string') return item.length > 0
-      return true
-    })
-  )
-}
-
-function paragraphBlock (text) {
-  const normalized = normalizeText(text)
-  return normalized ? { type: 'paragraph', text: normalized } : null
-}
-
-function badgeBlock (text, tone = 'neutral') {
-  const normalized = normalizeText(text)
-  return normalized ? { type: 'badge', text: normalized, tone } : null
-}
-
-function quoteBlock (text, attribution = null) {
-  const normalized = normalizeText(text)
-  return normalized
-    ? compactObject({ type: 'quote', text: normalized, attribution: normalizeText(attribution) || null })
-    : null
-}
-
-function codeBlock (text, language = 'text') {
-  const normalized = normalizeText(text)
-  return normalized ? { type: 'code', language, text: normalized } : null
-}
-
-function listBlock (items, ordered = false) {
-  const normalized = (items ?? []).map(normalizeText).filter(Boolean)
-  return normalized.length ? { type: 'list', ordered, items: normalized } : null
-}
-
-function jsonBlock (value) {
-  if (value == null) return null
-  return { type: 'json', value }
-}
-
-function getSourceRef (value) {
-  return normalizeText(value?.source_path ?? value?.source_ref ?? value?.stored_path) || null
-}
-
-function preferredScope (value) {
-  return normalizeText(value?.corpus ?? value?.domain) || null
-}
-
-function formatSourceLabel (value) {
-  const sourceRef = typeof value === 'string' ? normalizeText(value) : getSourceRef(value)
-  if (!sourceRef) return null
-
-  if (/^https?:\/\//i.test(sourceRef)) {
-    try {
-      const url = new URL(sourceRef)
-      const tail = url.pathname.split('/').filter(Boolean).pop()
-      return tail ? `${url.hostname}/${tail}` : url.hostname
-    } catch {
-      return sourceRef
-    }
-  }
-
-  const normalized = sourceRef.replace(/\\/g, '/')
-  if (normalized.includes('/')) {
-    return normalized.split('/').filter(Boolean).pop() ?? normalized
-  }
-  return sourceRef
-}
-
-function countLabel (count, singular, plural) {
-  const n = Number.isFinite(count) ? count : 0
-  return `${n} ${n === 1 ? singular : plural}`
 }
 
 function normalizeObjectPayload (value) {
@@ -660,498 +509,59 @@ function parseLearnPlanStatuses (value) {
   return statuses.length ? statuses : null
 }
 
-function makeEntry (runId, seq, mode, subject, status, summary, blocks = [], refs = [], raw = null) {
-  const ts = nowIso()
-  return {
-    id: `${runId}:entry:${seq}`,
-    seq,
-    mode,
-    subject,
-    status,
-    summary,
-    ts_start: ts,
-    ts_end: ts,
-    blocks: blocks.filter(Boolean),
-    refs: refs.filter(Boolean),
-    raw,
-  }
-}
-
-function summarizeTicket (ticket) {
-  const domains = ticket?.domains ?? []
-  if (domains.length) return `Routed to ${domains.join(', ')}`
-  if (ticket?.modality) return `Routed as ${ticket.modality}`
-  return normalizeText(ticket?.intent) || 'Request routed'
-}
-
-function summarizeAgentResult (event) {
-  if (event.foundNothing) return `No matching results in ${event.domain}`
-  if (event.isFilesystem) return `Searched filesystem in ${event.domain}`
-  if (event.isArtifacts) return `Collected ${countLabel(event.chunkCount, 'artifact', 'artifacts')}`
-  return `Collected ${countLabel(event.docCount, 'resource', 'resources')} and ${countLabel(event.chunkCount, 'excerpt', 'excerpts')}`
-}
-
-function filesystemBlocks (item) {
-  if (!item) return []
-  if (item.kind === 'fs_dir') {
-    const names = (item.entries ?? []).slice(0, 12).map(entry => `${entry.type === 'dir' ? '[dir]' : '[file]'} ${entry.name}`)
-    return [
-      paragraphBlock(item.path ? `Path: ${item.path}` : ''),
-      listBlock(names),
-      badgeBlock(countLabel(item.entries?.length ?? 0, 'visible item', 'visible items'), 'info'),
-    ]
-  }
-  if (item.kind === 'fs_find') {
-    const hits = (item.results ?? []).slice(0, 12).map(result => result.file ?? result.name ?? '')
-    return [
-      paragraphBlock(item.query ? `Query: ${item.query}` : ''),
-      listBlock(hits),
-      badgeBlock(countLabel(item.results?.length ?? 0, 'match', 'matches'), 'info'),
-    ]
-  }
-  if (item.kind === 'fs_file') {
-    return [
-      paragraphBlock(item.path ? `Read: ${item.path}` : ''),
-      codeBlock(item.content ?? '', 'text'),
-      item.truncated ? badgeBlock('truncated', 'warn') : null,
-    ]
-  }
-  return [jsonBlock(item)]
-}
-
-function resourceRef (value, fallbackLabel = 'resource') {
-  const locator = compactObject({
-    section: normalizeText(value?.section_header) || null,
-    char_start: value?.char_start ?? null,
-    char_end: value?.char_end ?? null,
-  })
-  return compactObject({
-    kind: 'resource',
-    target_id: getSourceRef(value) ?? (normalizeText(value?.doc_id ?? value?.resource_id) || null),
-    label: joinMeta(normalizeText(value?.title), normalizeText(value?.section_header), formatSourceLabel(value)) || fallbackLabel,
-    locator: Object.keys(locator).length ? locator : null,
-  })
-}
-
-function buildChronicleEntry (runId, seq, type, payload = {}) {
-  switch (type) {
-    case 'status': {
-      const summary = normalizeText(payload.message) || 'Status update'
-      return makeEntry(
-        runId,
-        seq,
-        'narrate',
-        { kind: 'session', label: 'Broker' },
-        'done',
-        summary,
-        [paragraphBlock(summary)],
-        [],
-        payload,
-      )
-    }
-
-    case 'ticket': {
-      const ticket = payload.data ?? {}
-      return makeEntry(
-        runId,
-        seq,
-        'observe',
-        { kind: 'session', label: 'Dispatcher' },
-        'done',
-        summarizeTicket(ticket),
-        [
-          paragraphBlock(ticket.intent),
-          listBlock((ticket.domains ?? []).map(domain => `corpus: ${domain}`)),
-          badgeBlock(ticket.modality, 'info'),
-          badgeBlock(ticket.urgency, 'neutral'),
-        ],
-        [],
-        ticket,
-      )
-    }
-
-    case 'agent_step': {
-      const queryArg = payload.args?.query
-        ?? payload.args?.task
-        ?? payload.args?.title
-        ?? payload.args?.path
-        ?? payload.args?.section_header
-      return makeEntry(
-        runId,
-        seq,
-        'act',
-        { kind: 'tool', id: normalizeText(payload.tool), label: normalizeText(payload.tool) || 'tool' },
-        'done',
-        `Ran ${normalizeText(payload.tool) || 'tool'}${payload.domain ? ` in ${payload.domain}` : ''}`,
-        [
-          paragraphBlock(queryArg ? `Input: ${queryArg}` : ''),
-          paragraphBlock(payload.reasoning),
-          badgeBlock(payload.domain ? `domain: ${payload.domain}` : '', 'info'),
-          badgeBlock(Number.isFinite(payload.resultCount) ? countLabel(payload.resultCount, 'result', 'results') : '', payload.resultCount === 0 ? 'warn' : 'success'),
-          payload.args && !queryArg ? jsonBlock(payload.args) : null,
-        ],
-        [compactObject({ kind: 'tool', target_id: normalizeText(payload.tool), label: normalizeText(payload.tool) || null })],
-        payload,
-      )
-    }
-
-    case 'verification': {
-      const summary = payload.phase === 'retry'
-        ? 'Retrying evidence lookup'
-        : 'Checked evidence support'
-      return makeEntry(
-        runId,
-        seq,
-        'observe',
-        { kind: 'session', label: 'Verifier' },
-        'done',
-        summary,
-        [
-          paragraphBlock(payload.rationale),
-          paragraphBlock(payload.query ? `Query: ${payload.query}` : ''),
-          paragraphBlock(payload.previousQuery ? `Previous: ${payload.previousQuery}` : ''),
-          paragraphBlock(payload.nextQuery ? `Next: ${payload.nextQuery}` : ''),
-          badgeBlock(Number.isFinite(payload.attempt) ? `attempt ${payload.attempt}` : '', 'neutral'),
-          badgeBlock(normalizeText(payload.verdict), payload.shouldRetry ? 'warn' : 'info'),
-          badgeBlock(payload.shouldRetry ? 'retrying' : 'accepted', payload.shouldRetry ? 'warn' : 'success'),
-        ],
-        [],
-        payload,
-      )
-    }
-
-    case 'agent_result': {
-      return makeEntry(
-        runId,
-        seq,
-        'observe',
-        {
-          kind: payload.isArtifacts ? 'artifact' : payload.isFilesystem ? 'tool' : 'resource',
-          id: normalizeText(payload.domain),
-          label: normalizeText(payload.domain) || 'result',
-        },
-        payload.foundNothing ? 'error' : 'done',
-        summarizeAgentResult(payload),
-        [
-          paragraphBlock(payload.task),
-          badgeBlock(payload.domain ? `domain: ${payload.domain}` : '', 'info'),
-          !payload.isFilesystem && !payload.isArtifacts ? badgeBlock(countLabel(payload.docCount, 'resource', 'resources'), 'neutral') : null,
-          !payload.isFilesystem ? badgeBlock(countLabel(payload.chunkCount, payload.isArtifacts ? 'artifact' : 'excerpt', payload.isArtifacts ? 'artifacts' : 'excerpts'), payload.foundNothing ? 'warn' : 'success') : null,
-          payload.isFilesystem ? paragraphBlock(payload.filesystemSummary) : null,
-        ],
-        [],
-        payload,
-      )
-    }
-
-    case 'result_item': {
-      const item = payload
-      const summary = item.kind === 'fs_dir'
-        ? `Browsed ${normalizeText(item.path) || 'directory'}`
-        : item.kind === 'fs_find'
-          ? `Searched for ${normalizeText(item.query) || 'matches'}`
-          : `Read ${normalizeText(item.path) || 'file'}`
-      return makeEntry(
-        runId,
-        seq,
-        'observe',
-        { kind: 'tool', label: item.kind },
-        'done',
-        summary,
-        filesystemBlocks(item),
-        [compactObject({ kind: 'resource', target_id: normalizeText(item.path), label: normalizeText(item.path ?? item.query) || null })],
-        item,
-      )
-    }
-
-    case 'evidence_card': {
-      const card = payload.card ?? payload
-      const quoteText = normalizeText(card.highlight_phrase) || normalizeText(card.content).slice(0, 400)
-      const attribution = joinMeta(normalizeText(card.title), normalizeText(card.section_header), formatSourceLabel(card))
-      return makeEntry(
-        runId,
-        seq,
-        'observe',
-        { kind: 'resource', id: getSourceRef(card) ?? normalizeText(card.doc_id), label: normalizeText(card.title) || 'resource excerpt' },
-        'done',
-        attribution || 'Observed resource excerpt',
-        [
-          badgeBlock(preferredScope(card), 'info'),
-          quoteBlock(quoteText, attribution || null),
-          paragraphBlock(card.annotation),
-        ],
-        [resourceRef(card)],
-        card,
-      )
-    }
-
-    case 'artifact_card': {
-      const artifact = payload.artifact ?? payload.resource ?? payload
-      const summary = normalizeText(artifact.title ?? artifact.filename) || 'Observed artifact'
-      return makeEntry(
-        runId,
-        seq,
-        'observe',
-        { kind: 'artifact', id: normalizeText(artifact.resource_id), label: summary },
-        'done',
-        summary,
-        [
-          paragraphBlock(artifact.summary ?? artifact.description),
-          badgeBlock(preferredScope(artifact), 'info'),
-          badgeBlock(normalizeText(artifact.resource_type ?? artifact.type), 'neutral'),
-        ],
-        [compactObject({ kind: 'artifact', target_id: normalizeText(artifact.resource_id), label: summary })],
-        artifact,
-      )
-    }
-
-    case 'error': {
-      const summary = normalizeText(payload.message) || 'Pipeline error'
-      return makeEntry(
-        runId,
-        seq,
-        'observe',
-        { kind: 'session', label: 'Broker' },
-        'error',
-        summary,
-        [paragraphBlock(summary)],
-        [],
-        payload,
-      )
-    }
-
-    default:
-      return null
-  }
-}
-
-function createChronicleEmitter (res, runId) {
-  let entrySeq = 0
-
-  const emit = (type, payload = {}) => {
-    writeSse(res, type, payload)
-  }
-
-  const send = (type, payload = {}) => {
-    emit(type, payload)
-    const entry = buildChronicleEntry(runId, ++entrySeq, type, payload)
-    if (entry) emit('chronicle_entry', { runId, entry })
-  }
-
-  return {
-    emit,
-    send,
-  }
-}
-
 // ---------------------------------------------------------------------------
-// POST /query — main pipeline entry point
-// Streams back SSE events to the client as each pipeline stage completes.
+// POST /query — accepts { message, sessionId?, userId?, workspaceId? }
+// Assembles context, calls LiteLLM via callOllama, streams tokens as SSE.
 // ---------------------------------------------------------------------------
 app.post('/query', async (req, res) => {
-  const { message, sessionId = randomUUID(), requestId: incomingRequestId = null, userId = 'default', workspaceId = null } = req.body
-  const requestId = normalizeText(incomingRequestId) || randomUUID()
-  const runId = requestId
+  const { message, sessionId = randomUUID(), userId = 'default', workspaceId = null } = req.body
 
   if (!message?.trim()) {
     return res.status(400).json({ error: 'message is required' })
   }
 
-  const trace = new Trace(requestId, sessionId, message)
-
-  // Set up SSE headers — the Electron app will consume these
   res.setHeader('Content-Type', 'text/event-stream')
   res.setHeader('Cache-Control', 'no-cache')
   res.setHeader('Connection', 'keep-alive')
   res.setHeader('Access-Control-Allow-Origin', '*')
   res.flushHeaders()
 
-  const { emit, send } = createChronicleEmitter(res, runId)
-  emit('run_start', {
-    runId,
-    sessionId,
-    userId,
-    workspaceId,
-    startedAt: nowIso(),
-  })
-
-  let runStatus = 'done'
-
   try {
-    // Stage 1: Context Assembler (no LLM, fast)
-    send('status', { message: 'Assembling context...' })
     const context = await assembleContext(sessionId, userId, workspaceId)
-    trace.stage('context', {
-      historyLength:   context.history?.length ?? 0,
-      contextSummary:  context.contextSummary,
-      userProfile:     { displayName: context.displayName, company: context.company, role: context.role },
-      history:         context.history,
+
+    const systemPrompt = [
+      context.contextSummary,
+      context.recentActivitySummary ? `\nRecent activity:\n${context.recentActivitySummary}` : '',
+    ].filter(Boolean).join('\n')
+
+    const tokenStream = await callOllama({
+      model: process.env.DEFAULT_MODEL ?? 'balanced',
+      systemPrompt,
+      userMessage: message,
+      history: context.history,
+      stream: true,
     })
 
-    // Stage 2: Dispatcher — classifies query, returns job ticket
-    send('status', { message: 'Routing your request...' })
-    const jobTicket = await dispatch(message, context, trace)
-    send('ticket', { data: jobTicket })
-
-    // Log this query for the self-organizing agent (non-blocking)
-    logQuery(userId, sessionId, jobTicket.intent, [jobTicket.modality ?? 'retrieve'], workspaceId)
-
     let fullResponse = ''
-    let agentResults = null
-
-    if (typeof jobTicket.directResponse === 'string' && jobTicket.directResponse.trim()) {
-      fullResponse = jobTicket.directResponse.trim()
-      send('token', { token: fullResponse })
-    } else if (jobTicket.modality === 'conversation') {
-      // General knowledge / conversational — skip agents, go straight to voice
-      send('status', { message: 'Thinking...' })
-      const tokenStream = await synthesizeStream({}, message, context, trace, jobTicket)
-      for await (const event of tokenStream) {
-        if (event && typeof event === 'object') {
-          if (event.type === 'card') {
-            send('evidence_card', { card: event.card })
-          } else if (event.type === 'token') {
-            fullResponse += event.token
-            send('token', { token: event.token })
-          }
-        } else {
-          fullResponse += event
-          send('token', { token: event })
-        }
-      }
-    } else {
-      // Stage 3: Orchestrator — calls domain agents per job ticket
-      const domainLabel = jobTicket.modality ?? 'resources'
-      send('status', { message: `Consulting ${domainLabel}...` })
-      agentResults = await orchestrate(jobTicket, message, context, trace, send)
-
-      // Emit one agent_result event per domain so the renderer can show the trace
-      for (const [domain, result] of Object.entries(agentResults)) {
-        const primary = (result.items ?? []).filter(c => !c.is_neighbor)
-        const docIds  = new Set(primary.map(c => c.doc_id).filter(Boolean))
-        send('agent_result', {
-          domain,
-          task:         jobTicket.topic ?? jobTicket.intent ?? '',
-          chunkCount:   result.isArtifacts ? result.items.length : result.isFilesystem ? 0 : primary.length,
-          docCount:     result.isArtifacts ? result.items.length : result.isFilesystem ? 0 : docIds.size,
-          foundNothing: result.foundNothing ?? (result.isArtifacts ? result.items.length === 0 : primary.length === 0),
-          isArtifacts:  result.isArtifacts ?? false,
-          isFilesystem: result.isFilesystem ?? false,
-          filesystemSummary: result.isFilesystem ? result.summary : undefined,
-          verificationVerdict: result.verification?.verdict,
-          verificationRationale: result.verification?.rationale,
-          triedQueries: result.triedQueries,
-        })
-      }
-
-      // Emit structured result items for filesystem results — UI renders them directly
-      // without the LLM narrating raw entry names (prevents hallucination/editorializing)
-      for (const [, result] of Object.entries(agentResults)) {
-        if (!result.isFilesystem) continue
-        for (const item of buildFilesystemItems(result)) {
-          send('result_item', item)
-        }
-      }
-
-      // Stage 4: Voice Layer — stream tokens and evidence cards directly to client
-      send('status', { message: 'Composing response...' })
-      const tokenStream = await synthesizeStream(agentResults, message, context, trace, jobTicket)
-      for await (const event of tokenStream) {
-        if (event && typeof event === 'object') {
-          if (event.type === 'card') {
-            send('evidence_card', { card: event.card })
-          } else if (event.type === 'artifact_card') {
-            send('artifact_card', { artifact: event.artifact })
-          } else if (event.type === 'token') {
-            fullResponse += event.token
-            send('token', { token: event.token })
-          }
-        } else {
-          fullResponse += event
-          send('token', { token: event })
-        }
-      }
-
-      if (context.activeScope) {
-        const resourceIds = collectScopeResourceIds(agentResults)
-        if (resourceIds.length > 0) {
-          try {
-            await recordScopeResourceHits({ scope: context.activeScope, resourceIds })
-          } catch (err) {
-            console.warn('[broker] scope experience update failed:', err.message)
-          }
-        }
-      }
+    for await (const token of tokenStream) {
+      fullResponse += token
+      res.write(`data: ${JSON.stringify({ type: 'token', token })}\n\n`)
     }
 
-    // Save this turn to conversation history.
-    // Persist structured metadata alongside the assistant turn so the dispatcher
-    // can ground follow-up pronouns ("it", "that", "those") to concrete facts
-    // rather than having to infer from vague prose history.
-    const assistantMeta = { modality: jobTicket.modality ?? null, topic: jobTicket.topic ?? null }
-    if (agentResults) {
-      // Collect filesystem paths that were actually returned so "it" / "that folder" resolves
-      const fsPaths = []
-      for (const result of Object.values(agentResults)) {
-        if (!result?.isFilesystem) continue
-        const raw = result.filesystemRaw ?? {}
-        if (raw.observations?.length) {
-          for (const o of raw.observations) {
-            // browse_path / read_file have the path in raw.path or args.path
-            const p = o.raw?.path ?? o.args?.path
-            if (p) fsPaths.push(p)
-            // find_path results have paths in the results array (not .path)
-            if (o.tool === 'find_path' && o.raw?.results?.length) {
-              for (const r of o.raw.results.slice(0, 10)) {
-                if (r.file) fsPaths.push(r.file)
-              }
-            }
-          }
-        } else {
-          const p = raw.path ?? raw.roots?.[0]
-          if (p) fsPaths.push(p)
-          // find_path results — include the matched paths
-          if (raw.results?.length) {
-            for (const r of raw.results.slice(0, 10)) {
-              if (r.file) fsPaths.push(r.file)
-            }
-          }
-        }
-      }
-      if (fsPaths.length) assistantMeta.filesystemPaths = [...new Set(fsPaths)]
-    }
-    saveConversationTurn(sessionId, 'user', message, { jobTicket }, userId, workspaceId)
-    saveConversationTurn(sessionId, 'assistant', fullResponse, assistantMeta, userId, workspaceId)
+    saveConversationTurn(sessionId, 'user', message, {}, userId, workspaceId)
+    saveConversationTurn(sessionId, 'assistant', fullResponse, {}, userId, workspaceId)
+    logQuery(userId, sessionId, message, ['chat'], workspaceId)
 
-    trace.finish(fullResponse)
-
+    res.write(`data: ${JSON.stringify({ type: 'done', sessionId })}\n\n`)
   } catch (err) {
-    console.error('[broker] pipeline error:', err)
-    trace.stage('error', { message: err.message, stack: err.stack })
-    trace.finish('')
-    runStatus = 'error'
-    send('error', { message: err.message ?? 'Pipeline error' })
+    console.error('[broker] /query error:', err)
+    res.write(`data: ${JSON.stringify({ type: 'error', message: err.message })}\n\n`)
   } finally {
-    emit('run_done', { runId, sessionId, traceId: trace.requestId, status: runStatus, endedAt: nowIso() })
-    emit('done', { sessionId, traceId: trace.requestId })
     res.end()
-    trace.save()
   }
 })
 
-// ---------------------------------------------------------------------------
-// GET /traces — list recent pipeline traces
-// ---------------------------------------------------------------------------
-app.get('/traces', (_req, res) => {
-  res.json(Trace.list())
-})
 
-// GET /traces/:id — fetch full trace JSON
-app.get('/traces/:id', (req, res) => {
-  const trace = Trace.read(req.params.id)
-  if (!trace) return res.status(404).json({ error: 'trace not found' })
-  res.json(trace)
-})
 
 // ---------------------------------------------------------------------------
 // DELETE /conversation/:sessionId — wipe stored turns for one session

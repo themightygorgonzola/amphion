@@ -1,2 +1,0 @@
--- Shared base class — all agents extend this
--- Handles: MCP server init, Ollama client, pgvector client, context packet
