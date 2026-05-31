@@ -20,11 +20,13 @@
 import fs     from 'fs'
 import path   from 'path'
 import crypto from 'crypto'
-import pg     from 'pg'
 import { fileURLToPath } from 'url'
 import { createRequire } from 'module'
 import { CHUNKING_VERSION, chunkDocument, chunkText } from './_chunking.mjs'
-import { attachResourceToScope, upsertScope } from '../apps/broker/src/organization-store.js'
+
+// pgvector removed — scope functions are no-ops until replaced
+const attachResourceToScope = async () => {}
+const upsertScope = async () => null
 
 const _require = createRequire(import.meta.url)
 
@@ -123,20 +125,10 @@ export function inferDocType (filePath) {
 // ---------------------------------------------------------------------------
 // Postgres (lazy singleton — shared across all ingest calls in one process)
 // ---------------------------------------------------------------------------
+// pgvector pool removed — ingestFile will fail gracefully if called
 let _pool = null
 export function getPool () {
-  if (!_pool) {
-    _pool = new pg.Pool({
-      host:     process.env.PGHOST     ?? 'localhost',
-      port:     parseInt(process.env.PGPORT ?? '5432', 10),
-      database: process.env.PGDATABASE ?? 'amphion',
-      user:     process.env.PGUSER     ?? 'amphion',
-      password: process.env.PGPASSWORD ?? 'changeme',
-      max:      3,
-    })
-    _pool.on('error', err => process.stderr.write(`[ingest-lib] pg error: ${err.message}\n`))
-  }
-  return _pool
+  throw new Error('[ingest-lib] pgvector removed — ingestFile is not available without PostgreSQL')
 }
 
 export async function closePool () {
