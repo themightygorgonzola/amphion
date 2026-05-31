@@ -980,11 +980,11 @@ app.get('/workspaces', (req, res) => {
 // Returns assembleContext() data without triggering LLM inference.
 // Auth-exempt (localhost-only, non-sensitive workspace metadata).
 // ---------------------------------------------------------------------------
-app.get('/context', (req, res) => {
+app.get('/context', async (req, res) => {
   const sessionId   = `${req.query.sessionId   ?? 'default'}`
   const userId      = `${req.query.userId      ?? 'default'}`
   const workspaceId = req.query.workspaceId ?? null
-  const ctx = assembleContext(sessionId, userId, workspaceId)
+  const ctx = await assembleContext(sessionId, userId, workspaceId)
   res.json({
     contextSummary:        ctx.contextSummary,
     recentActivitySummary: ctx.recentActivitySummary,

@@ -2,7 +2,7 @@
  * broker/src/context-assembler.js — Stage 1
  *
  * Builds the context packet prepended to every inference call.
- * No LLM involved — purely reading from SQLite.
+ * No LLM involved — purely reading from SQLite + optional fast PPM status check.
  *
  * When a workspaceId is supplied the summary is scoped to that workspace.
  * Without one, a compact list of all registered workspaces is included.
@@ -24,7 +24,33 @@ import { getWorkspaceInfo, getAllWorkspaces, getRecentHistory, getGlobalRecentHi
 const USER_NAME    = () => process.env.USER_NAME    || 'User'
 const DISPLAY_NAME = () => process.env.DISPLAY_NAME || 'Atlas'
 
-export function assembleContext (sessionId, userId = 'default', workspaceId = null) {
+const PPM_URL = (process.env.PPM_URL ?? 'http://localhost:7000').replace(/\/$/, '')
+const PPM_STATUS_TIMEOUT_MS = 300
+
+/** Fire-and-forget PPM health check. Returns a one-line status string or null. */
+async function fetchPpmStatus () {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), PPM_STATUS_TIMEOUT_MS)
+  try {
+    const res = await fetch(`${PPM_URL}/api/projects`, { signal: controller.signal })
+    if (!res.ok) return null
+    const projects = await res.json()
+    if (!Array.isArray(projects) || !projects.length) return null
+    const summary = projects
+      .map(p => {
+        const ok = p.status === 'alive' && (p.health?.status === 'healthy' || p.health?.score >= 80)
+        return `${p.name}:${ok ? '✓' : '✗'}`
+      })
+      .join(' ')
+    return `Services: ${summary}`
+  } catch {
+    return null
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+export async function assembleContext (sessionId, userId = 'default', workspaceId = null) {
   const activeScope = `${workspaceId ?? ''}`.trim() || null
 
   const workspace     = activeScope ? getWorkspaceInfo(activeScope) : null
@@ -32,6 +58,9 @@ export function assembleContext (sessionId, userId = 'default', workspaceId = nu
 
   const history      = getRecentHistory(sessionId, 10, userId)
   const globalRecent = getGlobalRecentHistory(6, userId, activeScope)
+
+  // Fire off PPM status in parallel with the rest of the assembly
+  const ppmStatusPromise = fetchPpmStatus()
 
   // Build a compact prompt-ready workspace summary
   const lines = []
@@ -64,6 +93,10 @@ export function assembleContext (sessionId, userId = 'default', workspaceId = nu
   } else {
     lines.push('(no workspace registry — run scripts/seed-workspaces.js)')
   }
+
+  // Append PPM status if it came back in time
+  const ppmStatus = await ppmStatusPromise
+  if (ppmStatus) lines.push(ppmStatus)
 
   const contextSummary = lines.join('\n')
 

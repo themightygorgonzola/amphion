@@ -5,9 +5,9 @@
  * Tools:
  *   amphion_query   — ask Amphion a question (SSE stream → text)
  *   amphion_learn   — kick off a background research task
- *   amphion_ingest  — ingest a file into Amphion's knowledge base
  *   ppm_status      — list all PPM services and their health
  *   ppm_logs        — recent events for a named PPM service
+ *   list_workspaces — list registered workspaces
  *
  * Config (env vars):
  *   AMPHION_BROKER_URL  — broker base URL (default: http://localhost:3000)
@@ -226,58 +226,6 @@ server.tool(
           queuedSources === 0
             ? '\nWARNING: No sources were queued. The plan will stall until sources are added. Retry with a sources: ["url1", "url2"] argument.'
             : '\nAmphion will research and ingest these sources. Query amphion_query later to access the results.',
-        ].join('\n'),
-      }],
-    };
-  }
-);
-
-// ── Tool: amphion_ingest ──────────────────────────────────────────────────────
-
-server.tool(
-  'amphion_ingest',
-  'Ingest a file from miracle\'s filesystem into Amphion\'s knowledge base. Amphion will chunk, embed, and index it for semantic search. The file must exist on miracle. SUPPORTED FILE TYPES: .md, .txt, .html, .htm only. Other file types (including .js, .py, .ts, .pdf, etc.) will be rejected as unsupported.',
-  {
-    file_path: z.string().describe(
-      'Absolute path to the file on miracle. Examples: "C:/MySoftwareFolder/docs/spec.pdf", "/home/dawso/notes.md"'
-    ),
-    corpus: z.string().describe(
-      'Knowledge corpus to store the file in. Examples: "research", "legal", "technical", "code"'
-    ),
-    force: z.boolean().optional().describe(
-      'Re-ingest even if the file is already in the corpus. Defaults to false.'
-    ),
-  },
-  async ({ file_path, corpus, force }) => {
-    const res = await fetch(`${BROKER_URL}/ingest`, {
-      method: 'POST',
-      headers: brokerHeaders(),
-      body: JSON.stringify({
-        filePath: file_path,
-        corpus,
-        force: force ?? false,
-      }),
-    });
-
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.error ?? data.message ?? `HTTP ${res.status}`);
-
-    if (data.reason === 'unsupported') {
-      throw new Error(`Unsupported file type. Amphion only accepts .md, .txt, .html, .htm files. Got: ${file_path}`);
-    }
-
-    const skipped = data.skipped ? ' (already indexed, use force:true to re-ingest)' : '';
-    const chunks = data.chunks ?? '?';
-    const ok = data.ok ?? (res.ok ? 'true' : 'false');
-
-    return {
-      content: [{
-        type: 'text',
-        text: [
-          `Ingested: ${data.ok ? 'success' : 'failed'}${skipped}`,
-          `Corpus: ${data.corpus ?? corpus}`,
-          `Chunks: ${chunks}`,
-          `File: ${file_path}`,
         ].join('\n'),
       }],
     };
