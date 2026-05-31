@@ -21,6 +21,9 @@ import { getWorkspaceInfo, getAllWorkspaces, getRecentHistory, getGlobalRecentHi
  * @property {string}        contextSummary  — prompt-ready string
  * @property {string}        recentActivitySummary
  */
+const USER_NAME    = () => process.env.USER_NAME    || 'User'
+const DISPLAY_NAME = () => process.env.DISPLAY_NAME || 'Atlas'
+
 export function assembleContext (sessionId, userId = 'default', workspaceId = null) {
   const activeScope = `${workspaceId ?? ''}`.trim() || null
 
@@ -32,7 +35,9 @@ export function assembleContext (sessionId, userId = 'default', workspaceId = nu
 
   // Build a compact prompt-ready workspace summary
   const lines = []
-  lines.push('Developer: David | Home machine (miracle) | Windows 11 + RTX 5080')
+  const name = USER_NAME()
+  const namePrefix = name && name !== 'User' ? `${name} | ` : ''
+  lines.push(`Developer: ${namePrefix}Home machine (miracle) | Windows 11 + RTX 5080`)
 
   if (workspace) {
     lines.push(`Active workspace: ${workspace.name}  [${workspace.path}]`)
@@ -64,12 +69,12 @@ export function assembleContext (sessionId, userId = 'default', workspaceId = nu
 
   const recentActivitySummary = globalRecent.length
     ? globalRecent.map(t =>
-        `  ${t.role === 'user' ? 'David' : 'Atlas'}: ${t.content?.slice(0, 120)}${t.content?.length > 120 ? '...' : ''}`
+        `  ${t.role === 'user' ? USER_NAME() : DISPLAY_NAME()}: ${t.content?.slice(0, 120)}${t.content?.length > 120 ? '...' : ''}`
       ).join('\n')
     : ''
 
   return {
-    displayName: 'David',
+    displayName: USER_NAME(),
     workspaceId: activeScope,
     activeScope,
     workspace,
