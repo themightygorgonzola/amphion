@@ -1,0 +1,16 @@
+{
+  "servers": {
+    "amphion": {
+      "type": "stdio",
+      "command": "node",
+      "args": [
+        "mcp-server/index.js"
+      ],
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "NODE_ENV": "development",
+        "AMPHION_BROKER_KEY": "sk-amphion-broker-C7mPxQ4nRvL2wZ9dT6hYsJ3bK8aF1eN5"
+      }
+    }
+  }
+}

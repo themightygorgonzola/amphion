@@ -66,7 +66,9 @@ export async function assembleContext (sessionId, userId = 'default', workspaceI
   const lines = []
   const name = USER_NAME()
   const namePrefix = name && name !== 'User' ? `${name} | ` : ''
-  lines.push(`Developer: ${namePrefix}Home machine (miracle) | Windows 11 + RTX 5080`)
+  const machineName = process.env.MACHINE_NAME || 'miracle'
+  const machineSpec = process.env.MACHINE_SPEC || 'Windows 11 + RTX 5080'
+  lines.push(`Developer: ${namePrefix}${machineName} | ${machineSpec}`)
 
   if (workspace) {
     lines.push(`Active workspace: ${workspace.name}  [${workspace.path}]`)

@@ -27,6 +27,7 @@ Thumbs.db
 
 # Editor
 .vscode/settings.json
+.vscode/launch.json
 .idea/
 
 # Logs
@@ -53,8 +54,7 @@ data/rcw/
 data/reload-renderer.flag
 memories/
 
-# Editor
-.vscode/
+# Editor (second block)
 notespaceworkspace.code-workspace
 
 # Test output
