@@ -383,7 +383,8 @@ server.tool(
     const [brokerHealth, ppmHealth, litellmHealth] = await Promise.all([
       probe(`${BROKER_URL}/health`),
       probe(`${PPM_URL}/api/projects`),
-      probe(`${LITELLM_URL}/health`),
+      // LiteLLM /health does live model calls and always hangs — use /v1/models instead
+      probe(`${LITELLM_URL}/v1/models`),
     ]);
 
     const lines = [
