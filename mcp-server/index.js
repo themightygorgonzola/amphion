@@ -22,6 +22,7 @@ import { z } from 'zod';
 const BROKER_URL       = (process.env.AMPHION_BROKER_URL  ?? 'http://localhost:3001').replace(/\/$/, '');
 const BROKER_KEY       = process.env.AMPHION_BROKER_KEY  ?? '';
 const PPM_URL          = (process.env.PPM_URL             ?? 'http://localhost:7000').replace(/\/$/, '');
+const LITELLM_URL      = (process.env.LITELLM_HOST        ?? 'http://localhost:4000').replace(/\/$/, '');
 // Default workspace scope for this MCP instance — set per VS Code workspace via .continue/config.yaml
 const DEFAULT_WORKSPACE = process.env.AMPHION_WORKSPACE_ID ?? null;
 
@@ -354,6 +355,47 @@ server.tool(
         text: `Registered workspaces (${workspaces.length}):${active}\n${lines.join('\n\n')}`,
       }],
     };
+  }
+);
+
+// ── Tool: system_context ─────────────────────────────────────────────────────
+
+server.tool(
+  'system_context',
+  'Get machine identity, routing configuration, and live health of all services (broker, PPM, LiteLLM). Call this first in every session to understand which machine you are on and which services are reachable over Tailscale.',
+  {},
+  async () => {
+    const machineName = process.env.MACHINE_NAME ?? 'unknown';
+    const machineSpec = process.env.MACHINE_SPEC ?? 'unknown';
+
+    async function probe(url, timeoutMs = 3000) {
+      try {
+        const ac = new AbortController();
+        const timer = setTimeout(() => ac.abort(), timeoutMs);
+        const res = await fetch(url, { signal: ac.signal });
+        clearTimeout(timer);
+        return res.ok ? '\u2713 ok' : `\u2717 HTTP ${res.status}`;
+      } catch {
+        return '\u2717 unreachable';
+      }
+    }
+
+    const [brokerHealth, ppmHealth, litellmHealth] = await Promise.all([
+      probe(`${BROKER_URL}/health`),
+      probe(`${PPM_URL}/api/projects`),
+      probe(`${LITELLM_URL}/health`),
+    ]);
+
+    const lines = [
+      `Machine:  ${machineName} | ${machineSpec}`,
+      '',
+      'Service routing:',
+      `  Amphion broker   ${BROKER_URL.padEnd(32)} ${brokerHealth}`,
+      `  PPM controller   ${PPM_URL.padEnd(32)} ${ppmHealth}`,
+      `  LiteLLM proxy    ${LITELLM_URL.padEnd(32)} ${litellmHealth}`,
+    ];
+
+    return { content: [{ type: 'text', text: lines.join('\n') }] };
   }
 );
 
